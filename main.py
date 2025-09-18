@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# main.py - Enhanced Crypto Trading Bot v2.0 (fixed & flow updated)
+# main.py - Enhanced Crypto Trading Bot v2.0 (updated with additional symbols & fixes)
 import os
 import re
 import asyncio
@@ -16,18 +16,20 @@ from matplotlib.dates import date2num
 from tempfile import NamedTemporaryFile
 from typing import Dict, List, Optional, Tuple
 import json
-import base64
 
 load_dotenv()
 
 # ---------------- CONFIG ----------------
-SYMBOLS = os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT").split(",")
+SYMBOLS = [
+    "BTCUSDT","ETHUSDT","SOLUSUSDT","XRPUSDT","AAVEUSDT",
+    "TRXUSDT","DOGEUSDT","BNBUSDT","ADAUSDT","LTCUSDT","LINKUSDT"
+]
 POLL_INTERVAL = max(30, int(os.getenv("POLL_INTERVAL", 1800)))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # change to gpt-4o-mini if available
-SIGNAL_CONF_THRESHOLD = float(os.getenv("SIGNAL_CONF_THRESHOLD", 80.0))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # change to gpt-4o-mini if you prefer
+SIGNAL_CONF_THRESHOLD = float(os.getenv("SIGNAL_CONF_THRESHOLD", 80.0))  # default 80%
 
 # Analysis windows
 RSI_PERIOD = int(os.getenv("RSI_PERIOD", 14))
@@ -69,6 +71,7 @@ def fmt_price(p: Optional[float]) -> str:
     return f"{v:.6f}" if abs(v) < 1 else f"{v:.2f}"
 
 def fmt_decimal(val, small_prec=6, large_prec=2):
+    """Flexible decimal formatting: useful for MACD/indicators."""
     if val is None:
         return "N/A"
     try:
@@ -127,8 +130,8 @@ def calculate_bollinger_bands(prices: List[float]) -> Tuple[Optional[float], Opt
 def calculate_fibonacci_retracements(highs: List[float], lows: List[float]) -> Dict[str, float]:
     if not highs or not lows:
         return {}
-    recent_high = max(highs[-50:])
-    recent_low = min(lows[-50:])
+    recent_high = max(highs[-50:]) if len(highs) >= 1 else 0
+    recent_low = min(lows[-50:]) if len(lows) >= 1 else 0
     diff = recent_high - recent_low
     fib_levels = {}
     for level in FIBONACCI_LEVELS:
@@ -172,7 +175,7 @@ def enhanced_volume_analysis(volumes: List[float], prices: List[float]) -> Dict[
     if len(volumes) < 20:
         return {}
     recent_volumes = volumes[-20:]
-    avg_volume = np.mean(recent_volumes[:-1])
+    avg_volume = np.mean(recent_volumes[:-1]) if len(recent_volumes) > 1 else 0
     current_volume = volumes[-1]
     volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
     price_change = (prices[-1] - prices[-2]) / prices[-2] if len(prices) >= 2 and prices[-2] != 0 else 0
@@ -249,7 +252,7 @@ async def fetch_enhanced_data(session, symbol):
             times = []
             volumes = []
             for x in candles:
-                # Binance kline: [openTime, open, high, low, close, volume, ...]
+                # Binance Kline format: [openTime, open, high, low, close, volume, ...]
                 open_price = float(x[1])
                 high = float(x[2])
                 low = float(x[3])
@@ -300,7 +303,7 @@ async def fetch_enhanced_data(session, symbol):
                 out["bid"] = bids[0][0]
                 out["ask"] = asks[0][0]
                 out["spread"] = asks[0][0] - bids[0][0]
-                out["spread_pct"] = (out["spread"] / bids[0][0]) * 100
+                out["spread_pct"] = (out["spread"] / bids[0][0]) * 100 if bids[0][0] != 0 else 0
                 total_bid_volume = sum(x[1] for x in bids[:10])
                 total_ask_volume = sum(x[1] for x in asks[:10])
                 out["order_imbalance"] = (total_bid_volume - total_ask_volume) / (total_bid_volume + total_ask_volume) if (total_bid_volume + total_ask_volume) != 0 else 0
@@ -354,7 +357,8 @@ def enhanced_plot_chart(times, candles, symbol, market_data):
     highs = [c[1] for c in candles]
     lows = [c[2] for c in candles]
     x = date2num(dates)
-    fig = plt.figure(figsize=(14, 9), dpi=120)
+    # Use constrained_layout to avoid tight_layout warnings
+    fig = plt.figure(figsize=(14, 9), dpi=120, constrained_layout=True)
     gs = fig.add_gridspec(4, 1, height_ratios=[3, 1, 1, 1], hspace=0.3)
     ax_price = fig.add_subplot(gs[0])
     ax_volume = fig.add_subplot(gs[1])
@@ -461,7 +465,7 @@ def enhanced_plot_chart(times, candles, symbol, market_data):
     ax_price.legend(loc="upper left", fontsize="small", framealpha=0.9)
     ax_price.grid(True, alpha=0.25)
     fig.autofmt_xdate()
-    plt.tight_layout()
+    # Save chart
     tmp = NamedTemporaryFile(delete=False, suffix=".png")
     fig.savefig(tmp.name, bbox_inches="tight", dpi=120, facecolor='white')
     plt.close(fig)
@@ -496,7 +500,7 @@ If no valid signal, reply "NO_SIGNAL"."""
                     {"role": "system", "content": prompt_system},
                     {"role": "user", "content": prompt_user}
                 ],
-                max_tokens=800,
+                max_tokens=1200,
                 temperature=0.0
             )
         resp = await loop.run_in_executor(None, call_model)
@@ -641,8 +645,10 @@ def track_signal_performance():
 
 # ---------------- Main loop ----------------
 async def enhanced_loop():
+    os.makedirs("ai_responses", exist_ok=True)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         startup_msg = f"🤖 ENHANCED Crypto Trading Bot v2.0\n• Symbols: {len(SYMBOLS)} • TF:30m • Poll: {POLL_INTERVAL}s • Conf≥{SIGNAL_CONF_THRESHOLD}%"
+        print(startup_msg)
         await send_text(session, startup_msg)
         iteration = 0
         while True:
@@ -670,10 +676,8 @@ async def enhanced_loop():
                     await asyncio.sleep(min(120, POLL_INTERVAL))
                     continue
                 # For each symbol: create chart, create market summary, ask OpenAI for signals
-                aggregate_summary_texts = []
                 signals_from_ai_texts = []
                 for symbol, data in market.items():
-                    # Build structured summary text for model
                     summary = {
                         "symbol": symbol,
                         "price": data.get("price"),
@@ -694,7 +698,6 @@ async def enhanced_loop():
                         "last_100_candles": len(data.get("candles", []))
                     }
                     summary_text = json.dumps(summary, default=str, indent=2)
-                    aggregate_summary_texts.append(f"### {symbol}\n{summary_text}\n")
                     # Create chart PNG for last 100 candles (if present)
                     chart_path = None
                     if data.get("candles") and data.get("times"):
@@ -702,20 +705,29 @@ async def enhanced_loop():
                             chart_path = enhanced_plot_chart(data["times"], data["candles"], symbol, data)
                         except Exception as e:
                             print(f"Chart error for {symbol}: {e}")
-                    # Prompt OpenAI per-symbol (small prompt) to get entry/sl/tp
                     per_symbol_prompt = f"{summary_text}\nChartPath: {chart_path if chart_path else 'N/A'}"
                     ai_response = await ask_openai_for_signals(per_symbol_prompt, chart_path=chart_path)
+                    # Log raw AI response
+                    print(f"--- OpenAI raw response for {symbol} ---")
+                    print(ai_response if ai_response else "<EMPTY RESPONSE>")
+                    print("--- end response ---")
+                    # Save raw AI response for debugging
+                    try:
+                        filename = f"ai_responses/{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                        with open(filename, "w", encoding="utf-8") as fh:
+                            fh.write(ai_response or "EMPTY")
+                    except Exception as e:
+                        print("Failed to save AI response:", e)
                     signals_from_ai_texts.append((symbol, ai_response, chart_path))
-                # Combine AI outputs, parse and send to telegram
-                combined_ai_text = "\n\n".join(f"{s}\n{txt}" for s, txt, _ in signals_from_ai_texts if txt)
+                # Parse AI outputs, collect signals
                 parsed_signals = {}
                 for symbol, txt, chart_path in signals_from_ai_texts:
                     parsed = enhanced_parse(txt)
-                    # parsed is dict with keys of symbols (likely same symbol)
                     for k, v in parsed.items():
                         parsed_signals[k] = {"signal": v, "chart": chart_path}
                 # Send signals to telegram
                 if parsed_signals:
+                    print(f"\n🚨 Found {len(parsed_signals)} HIGH-CONFIDENCE signals:")
                     for sym, payload in parsed_signals.items():
                         sig = payload["signal"]
                         chart = payload.get("chart")
@@ -744,6 +756,7 @@ _Reason:_ {reason}
 
 {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
 """
+                        print(f"   {sym}: {action} @ {fmt_price(entry)} | Conf: {confidence}% | R:R: {rr}")
                         if chart:
                             await send_photo(session, caption, chart)
                         else:
