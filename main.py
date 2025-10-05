@@ -429,8 +429,13 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                 # Debug output
                 print(f"  💡 BUY Setup: Score={score:.2f}, RR={rr:.2f}, BaseConf={base_conf:.0f}%")
                 
-                # Relaxed R/R for high confidence signals
-                rr_threshold = 1.5 if base_conf >= 75 else 1.8
+                # Adaptive R/R based on confidence
+                if base_conf >= 85:
+                    rr_threshold = 1.3  # Very high confidence = relaxed R/R
+                elif base_conf >= 75:
+                    rr_threshold = 1.5
+                else:
+                    rr_threshold = 1.8
                 
                 if rr >= rr_threshold:
                     confidence = min(90, int(base_conf))  # Cap at 90% before AI
@@ -470,8 +475,13 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                 # Debug output
                 print(f"  💡 SELL Setup: Score={score:.2f}, RR={rr:.2f}, BaseConf={base_conf:.0f}%")
                 
-                # Relaxed R/R for high confidence signals
-                rr_threshold = 1.5 if base_conf >= 75 else 1.8
+                # Adaptive R/R based on confidence
+                if base_conf >= 85:
+                    rr_threshold = 1.3  # Very high confidence = relaxed R/R
+                elif base_conf >= 75:
+                    rr_threshold = 1.5
+                else:
+                    rr_threshold = 1.8
                 
                 if rr >= rr_threshold:
                     confidence = min(90, int(base_conf))  # Cap at 90% before AI
