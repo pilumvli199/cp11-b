@@ -408,8 +408,8 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                 score += 1.5
                 reasons.append("Multiple bearish patterns")
         
-        # Base confidence (improved formula)
-        base_conf = 55 + abs(score) * 3.5
+        # Base confidence (improved formula with proper cap)
+        base_conf = min(90, 55 + abs(score) * 3.5)  # Cap at 90% before AI boost
         
         # Generate signals (relaxed criteria for high confidence)
         if score >= 4.5:  # Lowered from 5 (bullish)
@@ -430,10 +430,10 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                 print(f"  💡 BUY Setup: Score={score:.2f}, RR={rr:.2f}, BaseConf={base_conf:.0f}%")
                 
                 # Relaxed R/R for high confidence signals
-                rr_threshold = 1.5 if base_conf >= 80 else 1.8
+                rr_threshold = 1.5 if base_conf >= 75 else 1.8
                 
                 if rr >= rr_threshold:
-                    confidence = min(95, int(base_conf))
+                    confidence = min(90, int(base_conf))  # Cap at 90% before AI
                     return {
                         "side": "BUY",
                         "entry": entry,
@@ -471,10 +471,10 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                 print(f"  💡 SELL Setup: Score={score:.2f}, RR={rr:.2f}, BaseConf={base_conf:.0f}%")
                 
                 # Relaxed R/R for high confidence signals
-                rr_threshold = 1.5 if base_conf >= 80 else 1.8
+                rr_threshold = 1.5 if base_conf >= 75 else 1.8
                 
                 if rr >= rr_threshold:
-                    confidence = min(95, int(base_conf))
+                    confidence = min(90, int(base_conf))  # Cap at 90% before AI
                     return {
                         "side": "SELL",
                         "entry": entry,
@@ -496,7 +496,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
         
         return {
             "side": "none",
-            "confidence": int(base_conf),
+            "confidence": min(90, int(base_conf)),  # Proper cap
             "reason": "; ".join(reasons[:3]) if reasons else "no clear setup",
             "score": round(score, 2),
             "patterns": detected_patterns[:3],
