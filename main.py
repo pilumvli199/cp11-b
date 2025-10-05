@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# main.py - Enhanced Crypto Trading Bot v5.0 - Price Action Master Edition
-# Updated: Default threshold = 75% and debug / notification fixes so high-confidence candidates
-# (even when side == "none") can be reported. Ready to copy-paste.
+# main.py - Price Action Master Bot v5.1 (Debug-friendly)
+# - Default threshold 75%
+# - Always attach candidate entry/sl/tp even when R/R rejects
+# - Improved Telegram response logging and debug info
 
 import os
 import re
@@ -27,32 +28,25 @@ SYMBOLS = [
     "TRXUSDT","DOGEUSDT","BNBUSDT","ADAUSDT","LTCUSDT","LINKUSDT"
 ]
 
-# Poll interval (seconds)
-POLL_INTERVAL = max(30, int(os.getenv("POLL_INTERVAL", 1800)))
-
-# Telegram credentials (env)
+POLL_INTERVAL = max(30, int(os.getenv("POLL_INTERVAL", 1800)))  # seconds
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-# OpenAI (optional)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# Default signal confidence threshold (user requested 75%)
+# Default requested threshold
 SIGNAL_CONF_THRESHOLD = float(os.getenv("SIGNAL_CONF_THRESHOLD", 75.0))
 
-# If true, send notifications for candidates that have high confidence even if side == "none"
-# Making default True per your request to surface those "90% | NONE" items for debugging/action.
+# If true, send notifications for high-confidence candidates even if side == "none"
 NOTIFY_ON_NO_SIDE = os.getenv("NOTIFY_ON_NO_SIDE", "true").lower() in ("1", "true", "yes")
 
-# Minimum candles (720 = 30 days of 1H)
-MIN_CANDLES_REQUIRED = 720
+MIN_CANDLES_REQUIRED = 720  # 720 x 1H = 30 days
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 CANDLE_URL = "https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=720"
 
-# ---------------- Utils ----------------
+# ---------------- Helpers ----------------
 def fmt_price(p):
     try:
         p = float(p)
@@ -74,11 +68,13 @@ def ema(values, period):
     return ema_vals
 
 def calculate_emas(closes):
+    s9 = ema(closes, 9)
+    s20 = ema(closes, 20)
     return {
-        'ema_9': ema(closes, 9)[-1] if len(closes) >= 9 else None,
-        'ema_20': ema(closes, 20)[-1] if len(closes) >= 20 else None,
-        'ema_9_series': ema(closes, 9),
-        'ema_20_series': ema(closes, 20)
+        'ema_9': s9[-1] if len(s9) and s9[-1] is not None else (None if len(closes) < 9 else s9[-1]),
+        'ema_20': s20[-1] if len(s20) and s20[-1] is not None else (None if len(closes) < 20 else s20[-1]),
+        'ema_9_series': s9,
+        'ema_20_series': s20
     }
 
 def normalize_klines(raw_klines):
@@ -91,16 +87,14 @@ def normalize_klines(raw_klines):
                     "low": float(row[3]), "close": float(row[4]),
                     "volume": float(row[5]), "ts": int(row[0])
                 })
-        except:
+        except Exception:
             continue
     return out
 
-# ---------------- CANDLESTICK PATTERNS ----------------
+# ---------------- Candlestick Patterns ----------------
 def detect_candlestick_patterns(candles):
-    """Detect bullish/bearish candlestick patterns"""
     if len(candles) < 3:
         return []
-
     patterns = []
     for i in range(2, len(candles)):
         c0, c1, c2 = candles[i-2], candles[i-1], candles[i]
@@ -176,7 +170,7 @@ def detect_candlestick_patterns(candles):
 
     return patterns
 
-# ---------------- CHART PATTERNS ----------------
+# ---------------- Chart Patterns ----------------
 def detect_chart_patterns(highs, lows, closes, lookback=50):
     patterns = []
     n = min(len(highs), lookback)
@@ -185,7 +179,6 @@ def detect_chart_patterns(highs, lows, closes, lookback=50):
 
     recent_highs = highs[-n:]
     recent_lows = lows[-n:]
-
     swing_highs = []
     swing_lows = []
     for i in range(5, n-5):
@@ -194,7 +187,6 @@ def detect_chart_patterns(highs, lows, closes, lookback=50):
         if recent_lows[i] == min(recent_lows[i-5:i+5]):
             swing_lows.append((i, recent_lows[i]))
 
-    # Double Top/Bottom
     if len(swing_highs) >= 2:
         a, b = swing_highs[-2], swing_highs[-1]
         if abs(a[1] - b[1]) / a[1] < 0.02:
@@ -204,7 +196,6 @@ def detect_chart_patterns(highs, lows, closes, lookback=50):
         if abs(a[1] - b[1]) / a[1] < 0.02:
             patterns.append({"type": "Double Bottom", "sentiment": "bullish", "strength": 8})
 
-    # Triangles (simplified)
     if len(swing_highs) >= 3 and len(swing_lows) >= 3:
         high_trend = (swing_highs[-1][1] - swing_highs[-3][1]) / swing_highs[-3][1]
         low_trend = (swing_lows[-1][1] - swing_lows[-3][1]) / swing_lows[-3][1]
@@ -215,7 +206,6 @@ def detect_chart_patterns(highs, lows, closes, lookback=50):
         elif abs(high_trend) < 0.015 and abs(low_trend) < 0.015:
             patterns.append({"type": "Symmetrical Triangle", "sentiment": "neutral", "strength": 6})
 
-    # Head & Shoulders detection (simplified)
     if len(swing_highs) >= 3:
         h = swing_highs[-3:]
         if h[1][1] > h[0][1] and h[1][1] > h[2][1] and abs(h[0][1] - h[2][1]) / h[0][1] < 0.03:
@@ -223,14 +213,14 @@ def detect_chart_patterns(highs, lows, closes, lookback=50):
 
     return patterns
 
-# ---------------- SUPPORT / RESISTANCE ----------------
+# ---------------- Support/Resistance ----------------
 def calculate_sr_zones(closes, highs, lows, lookback=100):
     n = min(len(closes), lookback)
     prices = list(closes[-n:]) + list(highs[-n:]) + list(lows[-n:])
     zones = []
     tolerance = 0.003
     for p in prices:
-        if not p or p == 0:
+        if p is None or p == 0:
             continue
         found = False
         for zone in zones:
@@ -252,7 +242,7 @@ def calculate_sr_zones(closes, highs, lows, lookback=100):
         'resistance_strength': [z['touches'] for z in resistance_zones]
     }
 
-# ---------------- TRENDLINES ----------------
+# ---------------- Trendlines ----------------
 def detect_trendlines(highs, lows, closes, lookback=100):
     n = min(len(closes), lookback)
     if n < 20:
@@ -269,12 +259,15 @@ def detect_trendlines(highs, lows, closes, lookback=100):
             'support_trend': 'bullish' if support_slope > 0 else 'bearish',
             'resistance_trend': 'bullish' if resistance_slope > 0 else 'bearish'
         }
-    except:
+    except Exception:
         return {'support_line': None, 'resistance_line': None}
 
-# ---------------- TRADE ANALYSIS ----------------
+# ---------------- Analyze Trade Logic ----------------
 def analyze_trade_logic(raw_candles, rr_min=1.8):
-    """Enhanced trade analysis with improved debugging and clearer outputs."""
+    """
+    Returns dict with side (BUY/SELL/none), confidence, reason, score, patterns,
+    indicators, sr_zones, trendlines and candidate fields if R/R rejects.
+    """
     try:
         if not raw_candles:
             return {"side": "none", "confidence": 0, "reason": "no data"}
@@ -292,7 +285,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
 
         emas = calculate_emas(closes)
         ema9, ema20 = emas['ema_9'], emas['ema_20']
-        if not ema9 or not ema20:
+        if ema9 is None or ema20 is None:
             return {"side": "none", "confidence": 0, "reason": "insufficient EMA data"}
 
         candle_patterns = detect_candlestick_patterns(candles[-50:])
@@ -304,6 +297,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
         reasons = []
         detected_patterns = []
 
+        # EMA signals
         price_above_ema9 = current_price > ema9
         ema_bullish = ema9 > ema20
 
@@ -327,6 +321,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
             score -= 1.5
             reasons.append("Full bearish EMA")
 
+        # Candlestick weights
         bullish_patterns = [p for p in candle_patterns if p['sentiment'] == 'bullish']
         bearish_patterns = [p for p in candle_patterns if p['sentiment'] == 'bearish']
 
@@ -339,6 +334,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
             score -= p['strength'] * weight
             detected_patterns.append(p['type'])
 
+        # Chart pattern scoring
         for p in chart_patterns:
             if p['sentiment'] == 'bullish':
                 score += p['strength'] * 0.65
@@ -347,6 +343,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                 score -= p['strength'] * 0.65
                 detected_patterns.append(p['type'])
 
+        # S/R proximity
         supports = sr_zones['support']
         resistances = sr_zones['resistance']
         support_strength = sr_zones.get('support_strength', [])
@@ -364,6 +361,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
             score += 3.5 + strength_bonus
             reasons.append("Near strong resistance")
 
+        # Trendline alignment
         if trendlines.get('support_trend') == 'bullish' and score > 0:
             score += 2.5
             reasons.append("Bullish trendline")
@@ -371,6 +369,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
             score += 2.5
             reasons.append("Bearish trendline")
 
+        # Confluence
         if len(detected_patterns) >= 2:
             if score > 0 and len(bullish_patterns) >= 2:
                 score += 1.5
@@ -379,10 +378,9 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                 score += 1.5
                 reasons.append("Multiple bearish patterns")
 
-        # Base confidence — keep relationship with |score| but ensure clarity (cap 90)
         base_conf = min(90, int(55 + abs(score) * 3.5))
 
-        # Prepare default return (no side)
+        # Base result (candidate returned even if no final side)
         result = {
             "side": "none",
             "confidence": base_conf,
@@ -394,10 +392,10 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
             "trendlines": trendlines
         }
 
-        # Generate BUY
+        # --- BUY candidate (attach candidate fields even on rejection)
         if score >= 4.5:
             support = supports[0] if supports else current_price * 0.98
-            resistance = resistances[0] if resistances else current_price * 1.05
+            resistance = resistances[0] if resistances else current_price * 1.03
 
             entry = float(current_price)
             sl = float(support) * 0.996
@@ -406,9 +404,16 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
             risk = entry - sl
             reward = tp - entry
 
+            candidate = {
+                "candidate_entry": entry,
+                "candidate_sl": sl,
+                "candidate_tp": tp
+            }
+
             if risk > 0 and reward > 0:
                 rr = reward / risk
-                # adaptive rr threshold
+                candidate["candidate_rr"] = round(rr, 3)
+
                 if base_conf >= 85:
                     rr_threshold = 1.2
                 elif base_conf >= 75:
@@ -417,6 +422,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                     rr_threshold = 1.6
                 else:
                     rr_threshold = rr_min
+                candidate["rr_threshold"] = rr_threshold
 
                 if rr >= rr_threshold:
                     result.update({
@@ -429,12 +435,13 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                     })
                     return result
                 else:
-                    # keep result as candidate but add reason why buy rejected
+                    result.update(candidate)
                     result["reason"] = (result.get("reason","") + f"; BUY rejected: R/R {rr:.2f} < {rr_threshold}").strip("; ")
             else:
+                result.update(candidate)
                 result["reason"] = (result.get("reason","") + "; BUY rejected: invalid risk/reward").strip("; ")
 
-        # Generate SELL
+        # --- SELL candidate
         if score <= -4.5:
             support = supports[0] if supports else current_price * 0.95
             resistance = resistances[0] if resistances else current_price * 1.02
@@ -446,8 +453,16 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
             risk = sl - entry
             reward = entry - tp
 
+            candidate = {
+                "candidate_entry": entry,
+                "candidate_sl": sl,
+                "candidate_tp": tp
+            }
+
             if risk > 0 and reward > 0:
                 rr = reward / risk
+                candidate["candidate_rr"] = round(rr, 3)
+
                 if base_conf >= 85:
                     rr_threshold = 1.2
                 elif base_conf >= 75:
@@ -456,6 +471,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                     rr_threshold = 1.6
                 else:
                     rr_threshold = rr_min
+                candidate["rr_threshold"] = rr_threshold
 
                 if rr >= rr_threshold:
                     result.update({
@@ -468,11 +484,13 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                     })
                     return result
                 else:
+                    result.update(candidate)
                     result["reason"] = (result.get("reason","") + f"; SELL rejected: R/R {rr:.2f} < {rr_threshold}").strip("; ")
             else:
+                result.update(candidate)
                 result["reason"] = (result.get("reason","") + "; SELL rejected: invalid risk/reward").strip("; ")
 
-        # If neither side passed, return candidate (side none) with base_conf and clear reason
+        # Return candidate (side none) if no final trade
         return result
 
     except Exception as e:
@@ -480,7 +498,7 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
         traceback.print_exc()
         return {"side": "none", "confidence": 0, "reason": f"error: {e}"}
 
-# ---------------- CHART PLOTTING ----------------
+# ---------------- Chart plotting ----------------
 def plot_signal_chart(symbol, raw_candles, signal):
     candles = normalize_klines(raw_candles)
     if not candles or len(candles) < 50:
@@ -509,48 +527,61 @@ def plot_signal_chart(symbol, raw_candles, signal):
         ax1.plot([xi, xi], [l, h], color=color, linewidth=0.6, alpha=0.8)
         ax1.plot([xi, xi], [o, c], color=color, linewidth=2.5, solid_capstyle='round')
 
+    # EMAs - plot only if series lengths match x length
     try:
         ema9_series = ema(closes, 9)
         ema20_series = ema(closes, 20)
-        if len(ema9_series) == len(x):
-            ax1.plot(x, ema9_series, label='EMA 9', linewidth=1.5, alpha=0.9)
-        if len(ema20_series) == len(x):
-            ax1.plot(x, ema20_series, label='EMA 20', linewidth=1.5, alpha=0.9)
-    except:
+        # If series shorter than x (due to leading None), pad with None for plotting alignment:
+        def pad_series(s):
+            if not s:
+                return []
+            pad_len = len(x) - len(s)
+            return [None]*pad_len + s if pad_len >= 0 else s[-len(x):]
+        e9 = pad_series(ema9_series)
+        e20 = pad_series(ema20_series)
+        if len(e9) == len(x):
+            ax1.plot(x, e9, label='EMA 9', linewidth=1.5, alpha=0.9)
+        if len(e20) == len(x):
+            ax1.plot(x, e20, label='EMA 20', linewidth=1.5, alpha=0.9)
+    except Exception:
         pass
 
     sr_zones = signal.get('sr_zones', {})
     for i, sup in enumerate(sr_zones.get('support', [])[:2]):
         strength = sr_zones.get('support_strength', [0])[i] if i < len(sr_zones.get('support_strength', [])) else 1
         alpha = min(0.3, 0.1 + strength * 0.02)
-        ax1.axhline(sup, linestyle='--', linewidth=1.5, alpha=alpha)
-        ax1.axhspan(sup*0.998, sup*1.002, alpha=alpha*0.3)
-
+        ax1.axhline(sup, color='#4caf50', linestyle='--', linewidth=1.5, alpha=alpha)
+        ax1.axhspan(sup*0.998, sup*1.002, alpha=alpha*0.3, color='#4caf50')
     for i, res in enumerate(sr_zones.get('resistance', [])[:2]):
         strength = sr_zones.get('resistance_strength', [0])[i] if i < len(sr_zones.get('resistance_strength', [])) else 1
         alpha = min(0.3, 0.1 + strength * 0.02)
-        ax1.axhline(res, linestyle='--', linewidth=1.5, alpha=alpha)
-        ax1.axhspan(res*0.998, res*1.002, alpha=alpha*0.3)
+        ax1.axhline(res, color='#f44336', linestyle='--', linewidth=1.5, alpha=alpha)
+        ax1.axhspan(res*0.998, res*1.002, alpha=alpha*0.3, color='#f44336')
 
     trendlines = signal.get('trendlines', {})
     if trendlines.get('support_line'):
         slope, intercept = trendlines['support_line']
         tl = slope * np.arange(len(x)) + intercept
-        ax1.plot(x, tl, linestyle=':', linewidth=2, alpha=0.6)
+        ax1.plot(x, tl, color='#66bb6a', linestyle=':', linewidth=2, alpha=0.6)
     if trendlines.get('resistance_line'):
         slope, intercept = trendlines['resistance_line']
         tl = slope * np.arange(len(x)) + intercept
-        ax1.plot(x, tl, linestyle=':', linewidth=2, alpha=0.6)
+        ax1.plot(x, tl, color='#ef5350', linestyle=':', linewidth=2, alpha=0.6)
 
-    if signal.get('entry'):
-        ax1.axhline(signal['entry'], linestyle='-', linewidth=2)
-    if signal.get('sl'):
-        ax1.axhline(signal['sl'], linestyle='-', linewidth=2)
-    if signal.get('tp'):
-        ax1.axhline(signal['tp'], linestyle='-', linewidth=2)
+    # Entry/SL/TP (prefer final values, fall back to candidate_*)
+    entry = signal.get('entry') or signal.get('candidate_entry')
+    sl = signal.get('sl') or signal.get('candidate_sl')
+    tp = signal.get('tp') or signal.get('candidate_tp')
+    if entry:
+        ax1.axhline(entry, color='#ffeb3b', linestyle='-', linewidth=2, label=f"Entry {fmt_price(entry)}")
+    if sl:
+        ax1.axhline(sl, color='#ff5252', linestyle='-', linewidth=2, label=f"Stop Loss {fmt_price(sl)}")
+    if tp:
+        ax1.axhline(tp, color='#69f0ae', linestyle='-', linewidth=2, label=f"Take Profit {fmt_price(tp)}")
 
-    ax1.set_title(f'{symbol} - Price Action Analysis', color='white', fontsize=16, fontweight='bold', pad=20)
-    ax1.grid(True, alpha=0.15)
+    ax1.set_title(f'{symbol} - Price Action Analysis', color='white', fontsize=16, fontweight='bold', pad=12)
+    ax1.legend(loc='upper left', fontsize=9, framealpha=0.9, facecolor='#1a1f2e', edgecolor='#2a2f3e')
+    ax1.grid(True, alpha=0.15, color='#2a2f3e')
     ax1.tick_params(colors='white')
 
     volumes = [c['volume'] for c in candles]
@@ -566,11 +597,10 @@ def plot_signal_chart(symbol, raw_candles, signal):
     plt.close(fig)
     return tmp.name
 
-# ---------------- OPENAI VALIDATION ----------------
+# ---------------- OpenAI validation ----------------
 async def ask_openai_for_signals(symbol, signal_data):
     if not client:
         return None
-
     patterns_str = ", ".join(signal_data.get('patterns', [])[:3]) if signal_data.get('patterns') else "None"
     market_summary = {
         "symbol": symbol,
@@ -586,14 +616,12 @@ async def ask_openai_for_signals(symbol, signal_data):
             "reason": signal_data.get("reason")
         }
     }
-
     system_prompt = (
         "You are an elite crypto trader with 10+ years of experience in price action trading. "
         "Analyze the provided market data including candlestick patterns, chart patterns, EMAs, "
         "support/resistance zones, and trendlines. Either CONFIRM or REJECT the proposed trade. "
         "Provide: VERDICT (CONFIRM/REJECT), CONFIDENCE (0-100%), and a concise 2-sentence REASON."
     )
-
     user_prompt = f"""Market Analysis for {symbol}:
 
 Price: {market_summary['current_price']}
@@ -613,7 +641,6 @@ Respond in format:
 VERDICT: [CONFIRM/REJECT]
 CONFIDENCE: [0-100]%
 REASON: [Your 2-sentence analysis]"""
-
     try:
         loop = asyncio.get_running_loop()
         def call():
@@ -632,20 +659,20 @@ REASON: [Your 2-sentence analysis]"""
         print(f"OpenAI error: {e}")
         return None
 
-# ---------------- HTTP FETCH ----------------
+# ---------------- HTTP Fetch ----------------
 async def fetch_json(session, url):
     try:
         async with session.get(url, timeout=60) as r:
             if r.status != 200:
                 text = await r.text()
-                print(f"Fetch {url} -> {r.status}: {text[:200]}")
+                print(f"Fetch {url} -> {r.status}: {text[:300]}")
                 return None
             return await r.json()
     except Exception as e:
         print(f"Fetch error {url}: {e}")
         return None
 
-# ---------------- TELEGRAM HELPERS ----------------
+# ---------------- Telegram ----------------
 async def send_text(session, text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[Local] send_text:", text)
@@ -655,9 +682,9 @@ async def send_text(session, text):
         async with session.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}) as resp:
             txt = await resp.text()
             if resp.status != 200:
-                print(f"Telegram text failed: {resp.status} - {txt[:400]}")
+                print(f"Telegram text failed: {resp.status} - {txt[:1000]}")
             else:
-                print(f"Telegram text sent OK: {txt[:200]}")
+                print(f"Telegram text sent OK")
     except Exception as e:
         print(f"Telegram text error: {e}")
 
@@ -669,7 +696,6 @@ async def send_photo(session, caption, path):
         except:
             pass
         return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     try:
         with open(path, "rb") as f:
@@ -680,9 +706,9 @@ async def send_photo(session, caption, path):
             async with session.post(url, data=data) as resp:
                 text = await resp.text()
                 if resp.status != 200:
-                    print(f"Telegram photo upload failed: {resp.status} - {text[:400]}")
+                    print(f"Telegram photo upload failed: {resp.status} - {text[:1000]}")
                 else:
-                    print(f"Telegram photo sent OK: {text[:200]}")
+                    print(f"Telegram photo sent OK")
     except Exception as e:
         print(f"Telegram photo error: {e}")
     finally:
@@ -704,7 +730,7 @@ async def send_test_telegram(session):
                 print("Test message sent OK.")
                 return True
             else:
-                print(f"Test message failed: {r.status} - {text[:400]}")
+                print(f"Test message failed: {r.status} - {text[:1000]}")
                 return False
     except Exception as e:
         print(f"Send test error: {e}")
@@ -714,7 +740,7 @@ async def send_test_telegram(session):
 async def enhanced_loop():
     async with aiohttp.ClientSession() as session:
         startup = (
-            f"🚀 <b>Price Action Master Bot v5.0 Started!</b>\n\n"
+            f"🚀 <b>Price Action Master Bot v5.1 Started!</b>\n\n"
             f"📊 Symbols: {len(SYMBOLS)}\n"
             f"⏱ Timeframe: 1H\n"
             f"📈 Candles: {MIN_CANDLES_REQUIRED}\n"
@@ -729,14 +755,12 @@ async def enhanced_loop():
             f"• AI-Enhanced Validation"
         )
 
-        # Validate Telegram early
+        # Validate Telegram early and send startup
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
             warning = (
                 "⚠️ TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set.\n"
-                "Telegram alerts will not be delivered. Please set these env vars and restart.\n"
-                "Example (Linux/macOS):\n"
-                "export TELEGRAM_BOT_TOKEN='123456:ABC-DEF...'\n"
-                "export TELEGRAM_CHAT_ID='-1001234567890'\n"
+                "Telegram alerts will not be delivered. Set these env vars and restart.\n"
+                "Example:\nexport TELEGRAM_BOT_TOKEN='123:ABC'\nexport TELEGRAM_CHAT_ID='-1001234567890'\n"
             )
             print(warning)
             await send_text(session, startup + "\n\n" + warning)
@@ -744,7 +768,7 @@ async def enhanced_loop():
             await send_text(session, startup)
             ok = await send_test_telegram(session)
             if not ok:
-                print("Telegram test failed — check TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID and that the bot is allowed in the chat.")
+                print("Telegram test failed — check TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID and bot permissions in chat.")
 
         iteration = 0
         while True:
@@ -772,22 +796,18 @@ async def enhanced_loop():
                         "patterns": local_signal.get("patterns", [])
                     })
 
-                    # Determine whether to consider this candidate for notification
                     should_consider = False
                     if local_signal.get("side") != "none" and local_signal.get("confidence", 0) >= SIGNAL_CONF_THRESHOLD:
                         should_consider = True
                     elif NOTIFY_ON_NO_SIDE and local_signal.get("confidence", 0) >= SIGNAL_CONF_THRESHOLD:
-                        # notify high-confidence candidates even if side == "none"
                         should_consider = True
 
                     if should_consider:
-                        # Ask AI for validation if OpenAI key present
                         ai_response = None
                         ai_boost = 0
                         ai_verdict = "PENDING"
                         if client:
                             ai_response = await ask_openai_for_signals(sym, local_signal)
-
                         if ai_response:
                             if "CONFIRM" in ai_response.upper():
                                 ai_boost = 8
@@ -807,20 +827,17 @@ async def enhanced_loop():
 
                         final_confidence = max(0, min(95, int(local_signal.get("confidence", 0) + ai_boost)))
 
-                        # If final confidence meets threshold, send alert
                         if final_confidence >= SIGNAL_CONF_THRESHOLD:
                             signals_found += 1
                             patterns_text = ", ".join(local_signal.get('patterns', [])[:3]) or "None"
+                            entry_txt = fmt_price(local_signal.get('entry') or local_signal.get('candidate_entry') or "—")
+                            sl_txt = fmt_price(local_signal.get('sl') or local_signal.get('candidate_sl') or "—")
+                            tp_txt = fmt_price(local_signal.get('tp') or local_signal.get('candidate_tp') or "—")
+                            rr_val = local_signal.get('rr') or local_signal.get('candidate_rr') or 0
 
-                            entry_txt = fmt_price(local_signal.get('entry')) if local_signal.get('entry') else "—"
-                            sl_txt = fmt_price(local_signal.get('sl')) if local_signal.get('sl') else "—"
-                            tp_txt = fmt_price(local_signal.get('tp')) if local_signal.get('tp') else "—"
-                            rr_val = local_signal.get('rr', 0)
-
-                            # If side is NONE, add clear note in reason
                             reason_txt = local_signal.get('reason', '')
                             if local_signal.get('side') == "none":
-                                reason_txt = (reason_txt + " (CANDIDATE: no entry/SL/TP or rejected due to R/R)").strip()
+                                reason_txt = (reason_txt + " (CANDIDATE: no final entry/SL/TP or rejected due to R/R)").strip()
 
                             msg = (
                                 f"<b>🎯 {sym} {local_signal.get('side','NONE')} SIGNAL</b>\n\n"
@@ -851,17 +868,19 @@ async def enhanced_loop():
                         patterns = ", ".join(local_signal.get('patterns', [])[:2]) or "none"
                         print(f"📊 {sym}: No signal (Score: {score_val:.1f}, Conf: {conf}%, Patterns: {patterns}, Reason: {reason[:80]})")
 
-                    # Extra debug log: if confidence high but side none, print details for debugging
+                    # Extra debug: if high confidence but no final side, print details
                     if local_signal.get('side') == 'none' and local_signal.get('confidence', 0) >= SIGNAL_CONF_THRESHOLD:
                         print(f"DEBUG: Candidate {sym} confidence={local_signal.get('confidence')}% | score={local_signal.get('score')} | reason={local_signal.get('reason')}")
-                        # include top patterns
                         print(f"DEBUG: Patterns: {local_signal.get('patterns', [])}")
+                        # Print candidate fields if available
+                        if 'candidate_entry' in local_signal:
+                            print(f"DEBUG: candidate_entry={local_signal.get('candidate_entry')}, candidate_sl={local_signal.get('candidate_sl')}, candidate_tp={local_signal.get('candidate_tp')}, candidate_rr={local_signal.get('candidate_rr')}, rr_threshold={local_signal.get('rr_threshold')}")
 
                 except Exception as e:
                     print(f"❌ Error analyzing {sym}: {e}")
                     traceback.print_exc()
 
-            # Summary message
+            # Summary
             print(f"\n{'='*70}")
             print(f"📊 Iteration {iteration} complete: {signals_found} signals found")
             print(f"{'='*70}")
