@@ -411,8 +411,10 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
         # Base confidence (improved formula with proper cap)
         base_conf = min(90, 55 + abs(score) * 3.5)  # Cap at 90% before AI boost
         
-        # Generate signals (relaxed criteria for high confidence)
-        if score >= 4.5:  # Lowered from 5 (bullish)
+        # Generate signals (simplified and more aggressive)
+        
+        # Check if we should generate a BUY signal
+        if score >= 4.5:  # Bullish score
             support = supports[0] if supports else current_price * 0.98
             resistance = resistances[0] if resistances else current_price * 1.05
             
@@ -423,22 +425,28 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
             risk = entry - sl
             reward = tp - entry
             
-            if risk > 0:
+            print(f"  💡 BUY Setup: Score={score:.2f}, Entry={entry:.4f}, SL={sl:.4f}, TP={tp:.4f}")
+            print(f"     Risk={risk:.6f}, Reward={reward:.6f}")
+            
+            if risk > 0 and reward > 0:
                 rr = reward / risk
-                
-                # Debug output
-                print(f"  💡 BUY Setup: Score={score:.2f}, RR={rr:.2f}, BaseConf={base_conf:.0f}%")
+                print(f"     R/R={rr:.2f}, BaseConf={base_conf:.0f}%")
                 
                 # Adaptive R/R based on confidence
                 if base_conf >= 85:
-                    rr_threshold = 1.3  # Very high confidence = relaxed R/R
+                    rr_threshold = 1.2  # Very high confidence = very relaxed R/R
                 elif base_conf >= 75:
-                    rr_threshold = 1.5
+                    rr_threshold = 1.4
+                elif base_conf >= 70:
+                    rr_threshold = 1.6
                 else:
                     rr_threshold = 1.8
                 
+                print(f"     Required R/R: {rr_threshold}")
+                
                 if rr >= rr_threshold:
-                    confidence = min(90, int(base_conf))  # Cap at 90% before AI
+                    confidence = min(90, int(base_conf))
+                    print(f"  ✅ BUY SIGNAL GENERATED! Confidence={confidence}%")
                     return {
                         "side": "BUY",
                         "entry": entry,
@@ -454,11 +462,12 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                         "trendlines": trendlines
                     }
                 else:
-                    print(f"  ⚠️ BUY rejected: R/R {rr:.2f} < {rr_threshold} (need {rr_threshold}:1)")
+                    print(f"  ⚠️ BUY rejected: R/R {rr:.2f} < {rr_threshold}")
             else:
-                print(f"  ⚠️ BUY rejected: Invalid risk calculation (risk={risk:.4f})")
+                print(f"  ⚠️ BUY rejected: Invalid risk/reward (risk={risk:.6f}, reward={reward:.6f})")
         
-        elif score <= -4.5:  # Lowered from -5 (bearish)
+        # Check if we should generate a SELL signal
+        elif score <= -4.5:  # Bearish score
             support = supports[0] if supports else current_price * 0.95
             resistance = resistances[0] if resistances else current_price * 1.02
             
@@ -469,22 +478,28 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
             risk = sl - entry
             reward = entry - tp
             
-            if risk > 0:
+            print(f"  💡 SELL Setup: Score={score:.2f}, Entry={entry:.4f}, SL={sl:.4f}, TP={tp:.4f}")
+            print(f"     Risk={risk:.6f}, Reward={reward:.6f}")
+            
+            if risk > 0 and reward > 0:
                 rr = reward / risk
-                
-                # Debug output
-                print(f"  💡 SELL Setup: Score={score:.2f}, RR={rr:.2f}, BaseConf={base_conf:.0f}%")
+                print(f"     R/R={rr:.2f}, BaseConf={base_conf:.0f}%")
                 
                 # Adaptive R/R based on confidence
                 if base_conf >= 85:
-                    rr_threshold = 1.3  # Very high confidence = relaxed R/R
+                    rr_threshold = 1.2  # Very high confidence = very relaxed R/R
                 elif base_conf >= 75:
-                    rr_threshold = 1.5
+                    rr_threshold = 1.4
+                elif base_conf >= 70:
+                    rr_threshold = 1.6
                 else:
                     rr_threshold = 1.8
                 
+                print(f"     Required R/R: {rr_threshold}")
+                
                 if rr >= rr_threshold:
-                    confidence = min(90, int(base_conf))  # Cap at 90% before AI
+                    confidence = min(90, int(base_conf))
+                    print(f"  ✅ SELL SIGNAL GENERATED! Confidence={confidence}%")
                     return {
                         "side": "SELL",
                         "entry": entry,
@@ -500,9 +515,11 @@ def analyze_trade_logic(raw_candles, rr_min=1.8):
                         "trendlines": trendlines
                     }
                 else:
-                    print(f"  ⚠️ SELL rejected: R/R {rr:.2f} < {rr_threshold} (need {rr_threshold}:1)")
+                    print(f"  ⚠️ SELL rejected: R/R {rr:.2f} < {rr_threshold}")
             else:
-                print(f"  ⚠️ SELL rejected: Invalid risk calculation (risk={risk:.4f})")
+                print(f"  ⚠️ SELL rejected: Invalid risk/reward (risk={risk:.6f}, reward={reward:.6f})")
+        else:
+            print(f"  📊 Score {score:.2f} not strong enough (need >=4.5 or <=-4.5)")
         
         return {
             "side": "none",
