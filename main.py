@@ -232,15 +232,24 @@ class DeribitOptionsAPI:
                 data = await response.json()
                 
                 if not data.get("result"):
+                    logger.warning(f"No result from book_summary API")
                     return {"calls": [], "puts": []}
+                
+                logger.debug(f"Book summary returned {len(data['result'])} instruments")
                 
                 calls = []
                 puts = []
+                matched_count = 0
                 
                 for instrument in data["result"]:
+                    # Debug: Log expiry matching
+                    inst_expiry = instrument.get("expiration_timestamp")
+                    
                     # Filter by expiry
-                    if instrument.get("expiration_timestamp") != expiry:
+                    if inst_expiry != expiry:
                         continue
+                    
+                    matched_count += 1
                     
                     strike = instrument.get("strike")
                     option_type = instrument.get("option_type")
@@ -257,6 +266,8 @@ class DeribitOptionsAPI:
                         calls.append(option_data)
                     else:
                         puts.append(option_data)
+                
+                logger.info(f"   📊 Matched {matched_count} instruments for expiry {datetime.fromtimestamp(expiry/1000).strftime('%Y-%m-%d %H:%M')}")
                 
                 # Sort by strike
                 calls.sort(key=lambda x: x["strike"])
