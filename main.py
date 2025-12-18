@@ -191,7 +191,7 @@ class DeribitOptionsAPI:
             params = {
                 "currency": asset,
                 "kind": "option",
-                "expired": False
+                "expired": "false"  # String, not boolean!
             }
             
             async with self.session.get(url, params=params) as response:
