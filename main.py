@@ -14,12 +14,14 @@ import matplotlib.patches as mpatches
 from collections import defaultdict
 
 # ======================== CONFIGURATION ========================
-DERIBIT_API_URL = "https://www.deribit.com/api/v2/public"
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
+import os
 
-# Redis config (Railway addon)
-REDIS_URL = "redis://default:password@host:port"  # Railway will provide this
+DERIBIT_API_URL = "https://www.deribit.com/api/v2/public"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
+
+# Redis config (Railway addon) - Use environment variable
+REDIS_URL = os.getenv("REDIS_URL", None)  # Railway provides this automatically
 
 # Trading params
 ASSETS = ["BTC", "ETH"]
@@ -46,12 +48,18 @@ logger = logging.getLogger(__name__)
 
 # ======================== REDIS MEMORY MANAGER ========================
 class RedisMemory:
-    def __init__(self, redis_url: str):
+    def __init__(self, redis_url: Optional[str]):
         self.redis_url = redis_url
         self.client = None
+        self.enabled = redis_url is not None
         
     async def connect(self):
         """Connect to Redis"""
+        if not self.enabled:
+            logger.warning("⚠️ Redis URL not provided - running without historical memory")
+            logger.warning("   OI changes will not be tracked. Set REDIS_URL environment variable to enable.")
+            return
+            
         try:
             self.client = await redis.from_url(
                 self.redis_url,
@@ -62,7 +70,9 @@ class RedisMemory:
             logger.info("✅ Redis connected successfully")
         except Exception as e:
             logger.error(f"❌ Redis connection failed: {e}")
-            raise
+            logger.warning("⚠️ Continuing without Redis - OI changes will not be tracked")
+            self.enabled = False
+            self.client = None
     
     async def close(self):
         """Close Redis connection"""
@@ -72,54 +82,78 @@ class RedisMemory:
     
     async def store_oi_data(self, asset: str, strike: float, oi_data: Dict, ttl: int = 86400):
         """Store OI data with 24hr TTL"""
-        key = f"oi:{asset}:{strike}:{int(datetime.now().timestamp())}"
-        await self.client.setex(key, ttl, json.dumps(oi_data))
+        if not self.enabled or not self.client:
+            return
+        try:
+            key = f"oi:{asset}:{strike}:{int(datetime.now().timestamp())}"
+            await self.client.setex(key, ttl, json.dumps(oi_data))
+        except Exception as e:
+            logger.debug(f"Redis store error: {e}")
     
     async def get_oi_history(self, asset: str, strike: float, hours: int = 2) -> List[Dict]:
         """Get OI history for last N hours"""
-        pattern = f"oi:{asset}:{strike}:*"
-        keys = []
-        
-        async for key in self.client.scan_iter(match=pattern):
-            keys.append(key)
-        
-        # Filter by timestamp
-        cutoff = datetime.now().timestamp() - (hours * 3600)
-        valid_keys = [k for k in keys if int(k.split(":")[-1]) >= cutoff]
-        
-        # Get data
-        history = []
-        for key in valid_keys:
-            data = await self.client.get(key)
-            if data:
-                history.append(json.loads(data))
-        
-        return sorted(history, key=lambda x: x.get('timestamp', 0))
+        if not self.enabled or not self.client:
+            return []
+            
+        try:
+            pattern = f"oi:{asset}:{strike}:*"
+            keys = []
+            
+            async for key in self.client.scan_iter(match=pattern):
+                keys.append(key)
+            
+            # Filter by timestamp
+            cutoff = datetime.now().timestamp() - (hours * 3600)
+            valid_keys = [k for k in keys if int(k.split(":")[-1]) >= cutoff]
+            
+            # Get data
+            history = []
+            for key in valid_keys:
+                data = await self.client.get(key)
+                if data:
+                    history.append(json.loads(data))
+            
+            return sorted(history, key=lambda x: x.get('timestamp', 0))
+        except Exception as e:
+            logger.debug(f"Redis get error: {e}")
+            return []
     
     async def store_price_data(self, asset: str, price: float, volume: float):
         """Store price and volume data"""
-        key = f"price:{asset}:{int(datetime.now().timestamp())}"
-        data = {'price': price, 'volume': volume, 'timestamp': datetime.now().timestamp()}
-        await self.client.setex(key, 86400, json.dumps(data))
+        if not self.enabled or not self.client:
+            return
+        try:
+            key = f"price:{asset}:{int(datetime.now().timestamp())}"
+            data = {'price': price, 'volume': volume, 'timestamp': datetime.now().timestamp()}
+            await self.client.setex(key, 86400, json.dumps(data))
+        except Exception as e:
+            logger.debug(f"Redis store error: {e}")
     
     async def get_price_history(self, asset: str, hours: int = 2) -> List[Dict]:
         """Get price history for ATR calculation"""
-        pattern = f"price:{asset}:*"
-        keys = []
-        
-        async for key in self.client.scan_iter(match=pattern):
-            keys.append(key)
-        
-        cutoff = datetime.now().timestamp() - (hours * 3600)
-        valid_keys = [k for k in keys if int(k.split(":")[-1]) >= cutoff]
-        
-        history = []
-        for key in valid_keys:
-            data = await self.client.get(key)
-            if data:
-                history.append(json.loads(data))
-        
-        return sorted(history, key=lambda x: x.get('timestamp', 0))
+        if not self.enabled or not self.client:
+            return []
+            
+        try:
+            pattern = f"price:{asset}:*"
+            keys = []
+            
+            async for key in self.client.scan_iter(match=pattern):
+                keys.append(key)
+            
+            cutoff = datetime.now().timestamp() - (hours * 3600)
+            valid_keys = [k for k in keys if int(k.split(":")[-1]) >= cutoff]
+            
+            history = []
+            for key in valid_keys:
+                data = await self.client.get(key)
+                if data:
+                    history.append(json.loads(data))
+            
+            return sorted(history, key=lambda x: x.get('timestamp', 0))
+        except Exception as e:
+            logger.debug(f"Redis get error: {e}")
+            return []
 
 # ======================== DERIBIT API CLIENT ========================
 class DeribitOptionsAPI:
@@ -529,67 +563,131 @@ class SignalGenerator:
         put_oi_30min = oi_changes.get(put_strike, {}).get("30min", 0)
         put_oi_2hr = oi_changes.get(put_strike, {}).get("2hr", 0)
         
+        # If no historical data (Redis disabled), use relaxed OI requirements
+        has_history = any([call_oi_30min, call_oi_2hr, put_oi_30min, put_oi_2hr])
+        
         signal = None
         
         # 🟢 LONG SIGNAL (Buy Call)
-        if (
-            (current_price < max_pain or current_price <= strongest["put"]["strike"]) and
-            near_max_pain and
-            call_oi_30min >= OI_INCREASE_30MIN and
-            call_oi_2hr >= OI_INCREASE_2HR and
-            volume_spike and
-            cp_ratio > CALL_PUT_RATIO_LONG
-        ):
-            signal = {
-                "type": "LONG",
-                "action": "BUY CALL",
-                "reason": "Price below Max Pain + Call OI increasing + Volume spike + Bullish C/P ratio",
-                "scenario": "Strong Bullish (OI↑ Vol↑ Price→MP)"
-            }
+        if has_history:
+            # With history - full criteria
+            if (
+                (current_price < max_pain or current_price <= strongest["put"]["strike"]) and
+                near_max_pain and
+                call_oi_30min >= OI_INCREASE_30MIN and
+                call_oi_2hr >= OI_INCREASE_2HR and
+                volume_spike and
+                cp_ratio > CALL_PUT_RATIO_LONG
+            ):
+                signal = {
+                    "type": "LONG",
+                    "action": "BUY CALL",
+                    "reason": "Price below Max Pain + Call OI increasing + Volume spike + Bullish C/P ratio",
+                    "scenario": "Strong Bullish (OI↑ Vol↑ Price→MP)"
+                }
+        else:
+            # Without history - simplified criteria
+            if (
+                (current_price < max_pain or current_price <= strongest["put"]["strike"]) and
+                near_max_pain and
+                volume_spike and
+                cp_ratio > CALL_PUT_RATIO_LONG and
+                strongest["call"]["open_interest"] > strongest["put"]["open_interest"] * 1.2
+            ):
+                signal = {
+                    "type": "LONG",
+                    "action": "BUY CALL",
+                    "reason": "Price below Max Pain + High Call OI + Volume spike + Bullish C/P ratio",
+                    "scenario": "Bullish (Price→MP)"
+                }
         
         # 🔴 SHORT SIGNAL (Buy Put)
-        elif (
-            (current_price > max_pain or current_price >= strongest["call"]["strike"]) and
-            near_max_pain and
-            put_oi_30min >= OI_INCREASE_30MIN and
-            put_oi_2hr >= OI_INCREASE_2HR and
-            volume_spike and
-            cp_ratio < CALL_PUT_RATIO_SHORT
-        ):
-            signal = {
-                "type": "SHORT",
-                "action": "BUY PUT",
-                "reason": "Price above Max Pain + Put OI increasing + Volume spike + Bearish C/P ratio",
-                "scenario": "Strong Bearish (OI↑ Vol↑ Price→MP)"
-            }
+        if not signal:
+            if has_history:
+                if (
+                    (current_price > max_pain or current_price >= strongest["call"]["strike"]) and
+                    near_max_pain and
+                    put_oi_30min >= OI_INCREASE_30MIN and
+                    put_oi_2hr >= OI_INCREASE_2HR and
+                    volume_spike and
+                    cp_ratio < CALL_PUT_RATIO_SHORT
+                ):
+                    signal = {
+                        "type": "SHORT",
+                        "action": "BUY PUT",
+                        "reason": "Price above Max Pain + Put OI increasing + Volume spike + Bearish C/P ratio",
+                        "scenario": "Strong Bearish (OI↑ Vol↑ Price→MP)"
+                    }
+            else:
+                if (
+                    (current_price > max_pain or current_price >= strongest["call"]["strike"]) and
+                    near_max_pain and
+                    volume_spike and
+                    cp_ratio < CALL_PUT_RATIO_SHORT and
+                    strongest["put"]["open_interest"] > strongest["call"]["open_interest"] * 1.2
+                ):
+                    signal = {
+                        "type": "SHORT",
+                        "action": "BUY PUT",
+                        "reason": "Price above Max Pain + High Put OI + Volume spike + Bearish C/P ratio",
+                        "scenario": "Bearish (Price→MP)"
+                    }
         
         # 🟢 BREAKOUT LONG (Ignore Max Pain)
-        elif (
-            current_price >= strongest["call"]["strike"] and
-            call_oi_30min >= 20 and  # Stronger increase
-            volume_spike and
-            cp_ratio > 1.5  # Very bullish
-        ):
-            signal = {
-                "type": "LONG",
-                "action": "BUY CALL",
-                "reason": "Breakout above resistance + Strong Call OI increase + High volume",
-                "scenario": "Bullish Breakout"
-            }
+        if not signal:
+            if has_history:
+                if (
+                    current_price >= strongest["call"]["strike"] and
+                    call_oi_30min >= 20 and  # Stronger increase
+                    volume_spike and
+                    cp_ratio > 1.5  # Very bullish
+                ):
+                    signal = {
+                        "type": "LONG",
+                        "action": "BUY CALL",
+                        "reason": "Breakout above resistance + Strong Call OI increase + High volume",
+                        "scenario": "Bullish Breakout"
+                    }
+            else:
+                if (
+                    current_price >= strongest["call"]["strike"] and
+                    volume_spike and
+                    cp_ratio > 1.5
+                ):
+                    signal = {
+                        "type": "LONG",
+                        "action": "BUY CALL",
+                        "reason": "Breakout above resistance + High volume + Very bullish ratio",
+                        "scenario": "Bullish Breakout"
+                    }
         
         # 🔴 BREAKDOWN SHORT
-        elif (
-            current_price <= strongest["put"]["strike"] and
-            put_oi_30min >= 20 and
-            volume_spike and
-            cp_ratio < 0.6  # Very bearish
-        ):
-            signal = {
-                "type": "SHORT",
-                "action": "BUY PUT",
-                "reason": "Breakdown below support + Strong Put OI increase + High volume",
-                "scenario": "Bearish Breakdown"
-            }
+        if not signal:
+            if has_history:
+                if (
+                    current_price <= strongest["put"]["strike"] and
+                    put_oi_30min >= 20 and
+                    volume_spike and
+                    cp_ratio < 0.6  # Very bearish
+                ):
+                    signal = {
+                        "type": "SHORT",
+                        "action": "BUY PUT",
+                        "reason": "Breakdown below support + Strong Put OI increase + High volume",
+                        "scenario": "Bearish Breakdown"
+                    }
+            else:
+                if (
+                    current_price <= strongest["put"]["strike"] and
+                    volume_spike and
+                    cp_ratio < 0.6
+                ):
+                    signal = {
+                        "type": "SHORT",
+                        "action": "BUY PUT",
+                        "reason": "Breakdown below support + High volume + Very bearish ratio",
+                        "scenario": "Bearish Breakdown"
+                    }
         
         if signal:
             # Add trade details
@@ -847,6 +945,7 @@ class OptionsBot:
         logger.info("="*60)
         logger.info(f"📊 Assets: {', '.join(ASSETS)}")
         logger.info(f"⏱️  Analysis Interval: {ANALYSIS_INTERVAL // 60} minutes")
+        logger.info(f"💾 Redis Memory: {'✅ ENABLED' if self.memory.enabled else '⚠️ DISABLED (no historical OI tracking)'}")
         logger.info(f"🎯 Max Pain Range: ±{MAX_PAIN_PROXIMITY_PERCENT}%")
         logger.info(f"📈 ATM Strike Range: ±{ATM_RANGE_PERCENT}%")
         logger.info(f"🛑 Stop Loss: {ATR_MULTIPLIER}x ATR ({ATR_PERIOD} candles)")
