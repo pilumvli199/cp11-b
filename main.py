@@ -222,56 +222,84 @@ class DeribitOptionsAPI:
     async def get_option_chain(self, asset: str, expiry: int) -> Dict[str, List[Dict]]:
         """Get complete option chain for an expiry"""
         try:
-            url = f"{self.base_url}/get_book_summary_by_currency"
+            # Step 1: Get all option instruments for this currency
+            url = f"{self.base_url}/get_instruments"
             params = {
                 "currency": asset,
-                "kind": "option"
+                "kind": "option",
+                "expired": "false"
             }
             
             async with self.session.get(url, params=params) as response:
                 data = await response.json()
                 
                 if not data.get("result"):
-                    logger.warning(f"No result from book_summary API")
+                    logger.warning(f"No instruments returned")
                     return {"calls": [], "puts": []}
                 
-                logger.debug(f"Book summary returned {len(data['result'])} instruments")
-                
-                calls = []
-                puts = []
-                matched_count = 0
+                # Step 2: Filter instruments by expiry and collect instrument names
+                instruments_to_fetch = []
                 
                 for instrument in data["result"]:
-                    # Debug: Log expiry matching
-                    inst_expiry = instrument.get("expiration_timestamp")
-                    
-                    # Filter by expiry
-                    if inst_expiry != expiry:
-                        continue
-                    
-                    matched_count += 1
-                    
-                    strike = instrument.get("strike")
-                    option_type = instrument.get("option_type")
-                    
-                    option_data = {
-                        "strike": strike,
-                        "open_interest": instrument.get("open_interest", 0),
-                        "volume": instrument.get("volume", 0),
-                        "mark_price": instrument.get("mark_price", 0),
-                        "instrument_name": instrument.get("instrument_name", "")
-                    }
-                    
-                    if option_type == "call":
-                        calls.append(option_data)
-                    else:
-                        puts.append(option_data)
+                    if instrument.get("expiration_timestamp") == expiry:
+                        instruments_to_fetch.append({
+                            "name": instrument["instrument_name"],
+                            "strike": instrument["strike"],
+                            "type": instrument["option_type"]
+                        })
                 
-                logger.info(f"   📊 Matched {matched_count} instruments for expiry {datetime.fromtimestamp(expiry/1000).strftime('%Y-%m-%d %H:%M')}")
+                if not instruments_to_fetch:
+                    logger.warning(f"No instruments match expiry {datetime.fromtimestamp(expiry/1000).strftime('%Y-%m-%d %H:%M')}")
+                    return {"calls": [], "puts": []}
+                
+                logger.info(f"   📋 Found {len(instruments_to_fetch)} instruments for target expiry")
+                
+                # Step 3: Fetch ticker data for each instrument (batched to avoid spam)
+                calls = []
+                puts = []
+                
+                # Process in batches to avoid rate limits
+                batch_size = 10
+                for i in range(0, len(instruments_to_fetch), batch_size):
+                    batch = instruments_to_fetch[i:i+batch_size]
+                    
+                    for inst in batch:
+                        try:
+                            ticker_url = f"{self.base_url}/ticker"
+                            ticker_params = {"instrument_name": inst["name"]}
+                            
+                            async with self.session.get(ticker_url, params=ticker_params) as ticker_response:
+                                ticker_data = await ticker_response.json()
+                                
+                                if ticker_data.get("result"):
+                                    result = ticker_data["result"]
+                                    
+                                    option_data = {
+                                        "strike": inst["strike"],
+                                        "open_interest": result.get("open_interest", 0),
+                                        "volume": result.get("stats", {}).get("volume", 0) if result.get("stats") else 0,
+                                        "mark_price": result.get("mark_price", 0),
+                                        "instrument_name": inst["name"]
+                                    }
+                                    
+                                    if inst["type"] == "call":
+                                        calls.append(option_data)
+                                    else:
+                                        puts.append(option_data)
+                        
+                        except Exception as e:
+                            logger.debug(f"Error fetching ticker for {inst['name']}: {e}")
+                            continue
+                    
+                    # Delay between batches
+                    if i + batch_size < len(instruments_to_fetch):
+                        await asyncio.sleep(0.5)
                 
                 # Sort by strike
                 calls.sort(key=lambda x: x["strike"])
                 puts.sort(key=lambda x: x["strike"])
+                
+                logger.info(f"   📊 Successfully fetched: {len(calls)} Calls, {len(puts)} Puts")
                 
                 return {"calls": calls, "puts": puts}
                 
