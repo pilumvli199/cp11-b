@@ -823,8 +823,8 @@ class ChartGenerator:
         
         plt.tight_layout()
         
-        # Save
-        filename = f"/home/claude/chart_{asset}_{int(datetime.now().timestamp())}.png"
+        # Save to /tmp directory (Railway compatible)
+        filename = f"/tmp/chart_{asset}_{int(datetime.now().timestamp())}.png"
         plt.savefig(filename, dpi=150, facecolor='white')
         plt.close()
         
