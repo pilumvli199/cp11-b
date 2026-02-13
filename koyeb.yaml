@@ -1,0 +1,92 @@
+name: eth-options-bot-india
+services:
+  - name: bot
+    type: web
+    build:
+      type: docker
+    ports:
+      - port: 8000
+    health_checks:
+      - http:
+          port: 8000
+          path: /health
+```
+
+### 3. **.dockerignore** - Excludes junk files
+
+### 4. **SETUP.txt** - Quick deployment guide (NO .md!)
+
+---
+
+## 📁 Final Files (9 Total):
+
+1. ✅ **eth_options_bot_india_pro.py** - Main bot
+2. ✅ **requirements.txt** - Dependencies  
+3. ✅ **env.example** - Config template
+4. ✅ **Dockerfile** - FIXED build config
+5. ✅ **Procfile** - Start command
+6. ✅ **runtime.txt** - Python 3.11
+7. ✅ **koyeb.yaml** - NEW! Auto config
+8. ✅ **.dockerignore** - Exclude files
+9. ✅ **SETUP.txt** - Deployment guide
+
+---
+
+## 🚀 Koyeb Deployment (Fresh Start):
+
+### Quick Steps:
+
+1. **सारे 9 files** GitHub repo मध्ये upload करा
+
+2. **Koyeb Dashboard:**
+   - Create Service
+   - Source: **GitHub** (repo select करा)
+   - Builder: **Auto-detect** (koyeb.yaml वापरेल)
+   - किंवा manually: Builder = **Docker**
+
+3. **Environment Variables Add करा:**
+```
+   DELTA_API_KEY=your_key
+   DELTA_API_SECRET=your_secret
+   TELEGRAM_BOT_TOKEN=your_token
+   TELEGRAM_CHAT_ID=your_chat_id
+   DEEPSEEK_API_KEY=your_deepseek_key
+   PORT=8000
+```
+
+4. **Deploy Button दाबा!**
+
+---
+
+## ✅ Build Success दिसेल:
+```
+✓ Clone repository       - 1s
+✓ Start Docker          - 5s
+✓ Build image           - 30s  ← हा succeed होईल!
+✓ Push image            - 10s
+✓ Deploy container      - 5s
+✓ Service Running       - ✅
+```
+
+---
+
+## 🎯 Verify Deployment:
+
+### 1. Check Health:
+```
+Visit: https://your-app-xxx.koyeb.app/health
+
+Response:
+✅ ETH Options Bot v6.0 PRO 🇮🇳 | Cache: 15m=0/24
+```
+
+### 2. Check Logs (Koyeb Dashboard):
+```
+╔══════════════════════════════════════════╗
+║ 🚀 ETH OPTIONS BOT v6.0 PRO – INDIA 🇮🇳 ║
+╚══════════════════════════════════════════╝
+
+💰 ETH: $2,450.00
+📅 Daily expiry: 2026-02-13
+✅ 21 strikes | PCR:1.15
+📦 15-min cache: 1/24
