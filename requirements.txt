@@ -1,17 +1,13 @@
 # ETH OPTIONS BOT v6.0 - Delta Exchange India
 # Python 3.11 REQUIRED
 
-# Build tools (required for buildpack)
-setuptools>=65.0.0
-wheel
+# Core async HTTP client
+aiohttp==3.11.11
 
-# Async HTTP Client
-aiohttp==3.9.1
+# Data processing (versions with pre-built wheels for Python 3.11)
+pandas==2.2.3
+numpy==1.26.4
 
-# Data Processing (pre-compiled wheels only!)
-pandas==2.0.3
-numpy==1.24.3
-
-# Date/Time Utilities
-python-dateutil==2.8.2
-pytz==2023.3
+# Date/Time utilities
+python-dateutil==2.9.0
+pytz==2024.2
