@@ -1,12 +1,12 @@
 """
-🚀 ETH OPTIONS BOT - DELTA EXCHANGE GLOBAL v6.0
-=================================================
-Platform  : Delta Exchange Global (api.delta.exchange)
+🚀 ETH OPTIONS BOT - DELTA EXCHANGE INDIA v6.0 PRO
+====================================================
+Platform  : Delta Exchange India (api.india.delta.exchange)
 Asset     : ETH Daily Options
 Updated   : Feb 2026
 
-✅ v6.0 FEATURES:
-- Delta Exchange Global API (api_key + secret auth)
+✅ v6.0 PRO FEATURES:
+- Delta Exchange India API (api_key + secret auth)
 - ETH Daily Expiry auto-detection
 - Snapshot every 15 min (stores to 15-min cache)
 - Full Analysis every 30 min (stores to 30-min cache + DeepSeek)
@@ -17,6 +17,8 @@ Updated   : Feb 2026
 - 4 Standalone Alerts: OI Change / Volume Spike / PCR Change / ATM Proximity
 - TRAP detection: OI up but Volume flat = ignore
 - DeepSeek V3 (45s timeout) + fallback logic
+- 🆕 PRO STRATEGY: ATM ±10 fetch, smart filtering for AI
+- 🆕 INDIA API: Optimized for india.delta.exchange
 """
 
 import asyncio
@@ -43,13 +45,14 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "YOUR_CHAT_ID")
 DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY",   "YOUR_DEEPSEEK_KEY")
 
-# API
-DELTA_BASE_URL = "https://api.delta.exchange"
+# API - DELTA EXCHANGE INDIA 🇮🇳
+DELTA_BASE_URL = "https://api.india.delta.exchange"
 
 # Asset
 UNDERLYING       = "ETH"
-ATM_STRIKE_COUNT = 5     # ±5 strikes from ATM (11 total)
-STRIKE_INTERVAL  = 50    # Default $50; auto-detected at runtime
+ATM_STRIKE_FETCH = 10    # Fetch ±10 strikes (21 total) for comprehensive view
+ATM_STRIKE_AI    = 5     # Send only ±5 strikes to AI (11 total) + key OI levels
+STRIKE_INTERVAL  = 20    # Default $20 for India; auto-detected at runtime
 
 # Timing
 SNAPSHOT_INTERVAL = 15 * 60   # 15 min  → always collect snapshot
@@ -85,6 +88,10 @@ FAR_WEIGHT      = 1.0
 MAX_RETRIES      = 3
 API_DELAY        = 0.35
 DEEPSEEK_TIMEOUT = 45
+
+# Filtering for AI (Pro Strategy)
+MIN_OI_THRESHOLD = 50     # Minimum OI to consider a far strike relevant
+MIN_VOL_THRESHOLD = 10    # Minimum volume to consider a far strike relevant
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
@@ -222,11 +229,11 @@ class DualCache:
 
 
 # ============================================================
-#  DELTA EXCHANGE CLIENT
+#  DELTA EXCHANGE INDIA CLIENT 🇮🇳
 # ============================================================
 
 class DeltaClient:
-    """Delta Exchange Global v2 API client with HMAC authentication"""
+    """Delta Exchange India v2 API client with HMAC authentication"""
 
     def __init__(self, api_key: str, api_secret: str):
         self.api_key    = api_key
@@ -301,7 +308,7 @@ class DeltaClient:
             "states":         "live"
         })
         if not data or not data.get("result"):
-            logger.error("❌ No products from Delta Exchange")
+            logger.error("❌ No products from Delta Exchange India")
             return [], ""
 
         products = data["result"]
@@ -400,9 +407,12 @@ class DeltaClient:
         df = pd.DataFrame(rows).set_index("timestamp").sort_index()
         return df.tail(count)
 
-    # ── Full Market Snapshot ──────────────────────────────────
+    # ── Full Market Snapshot (PRO STRATEGY) ───────────────────
     async def fetch_snapshot(self) -> Optional[MarketSnapshot]:
-        """Fetch ETH spot + all ATM±5 strikes OI/Volume"""
+        """
+        Fetch ETH spot + all ATM±10 strikes OI/Volume
+        PRO STRATEGY: Fetch wider range for comprehensive view
+        """
 
         # 1. Spot price
         spot = await self.get_eth_spot()
@@ -432,10 +442,13 @@ class DeltaClient:
 
         atm = min(strikes_all, key=lambda s: abs(s - spot))
         atm_idx = strikes_all.index(atm)
-        lo, hi = max(0, atm_idx - ATM_STRIKE_COUNT), min(len(strikes_all), atm_idx + ATM_STRIKE_COUNT + 1)
+        
+        # PRO STRATEGY: Fetch ±10 strikes (wider range)
+        lo = max(0, atm_idx - ATM_STRIKE_FETCH)
+        hi = min(len(strikes_all), atm_idx + ATM_STRIKE_FETCH + 1)
         selected = set(strikes_all[lo:hi])
 
-        logger.info(f"📊 ATM:${atm:,.0f} | Step:${strike_step:.0f} | Strikes:{len(selected)}")
+        logger.info(f"📊 ATM:${atm:,.0f} | Step:${strike_step:.0f} | Strikes:{len(selected)} (±{ATM_STRIKE_FETCH})")
 
         # 4. Separate calls/puts
         calls = {float(p["strike_price"]): p for p in options
@@ -497,11 +510,14 @@ class DeltaClient:
 
 
 # ============================================================
-#  MULTI-TIMEFRAME OI ANALYZER
+#  MULTI-TIMEFRAME OI ANALYZER (PRO STRATEGY)
 # ============================================================
 
 class MTFAnalyzer:
-    """OI + Volume analysis across 15-min + 30-min timeframes"""
+    """
+    OI + Volume analysis across 15-min + 30-min timeframes
+    PRO STRATEGY: Smart filtering for AI prompts
+    """
 
     def __init__(self, cache: DualCache):
         self.cache = cache
@@ -602,7 +618,7 @@ class MTFAnalyzer:
             # ── Weight ──
             is_atm   = (strike == current.atm_strike)
             dist     = abs(strike - current.atm_strike)
-            step     = max(50, min(100, int(dist / max(1, ATM_STRIKE_COUNT - 1))))
+            step     = max(20, min(100, int(dist / max(1, ATM_STRIKE_FETCH - 1))))
             if is_atm:               weight = ATM_WEIGHT
             elif dist <= step * 2:   weight = NEAR_ATM_WEIGHT
             else:                    weight = FAR_WEIGHT
@@ -883,10 +899,36 @@ class PatternDetector:
 
 
 # ============================================================
-#  PROMPT BUILDER
+#  PROMPT BUILDER (PRO STRATEGY - SMART FILTERING)
 # ============================================================
 
 class PromptBuilder:
+    """
+    PRO STRATEGY: Filter strikes smartly to send only relevant data to AI
+    - Always include ATM ±5 strikes (core action zone)
+    - Only include far strikes (±6 to ±10) if they have significant OI/Volume
+    - Always include Support/Resistance levels even if far
+    """
+
+    @staticmethod
+    def _filter_strikes(analyses: List[StrikeAnalysis], atm: float, sr) -> List[StrikeAnalysis]:
+        """Smart filtering: ATM ±5 + key OI levels"""
+        filtered = []
+        
+        for sa in analyses:
+            # Always include ATM ±5 strikes (core zone)
+            if sa.distance_atm <= (5 * STRIKE_INTERVAL):
+                filtered.append(sa)
+            # Always include Support/Resistance strikes
+            elif sa.is_support or sa.is_resistance:
+                filtered.append(sa)
+            # Include far strikes only if significant OI or Volume
+            elif (sa.ce_oi >= MIN_OI_THRESHOLD or sa.pe_oi >= MIN_OI_THRESHOLD or
+                  sa.ce_volume >= MIN_VOL_THRESHOLD or sa.pe_volume >= MIN_VOL_THRESHOLD):
+                filtered.append(sa)
+        
+        logger.info(f"🎯 Strike filtering: {len(analyses)} → {len(filtered)} (sent to AI)")
+        return filtered
 
     @staticmethod
     def _short_candles(df: pd.DataFrame, label: str, base: int) -> str:
@@ -920,17 +962,21 @@ class PromptBuilder:
         pcr   = oi["overall_pcr"]
         base  = int(spot / 1000) * 1000   # e.g. 3000 for ETH at $3245
 
+        # PRO STRATEGY: Filter strikes smartly
+        all_analyses = oi["strike_analyses"]
+        filtered_analyses = PromptBuilder._filter_strikes(all_analyses, atm, sr)
+
         # ── Header ──
         p  = f"ETH OPTIONS | {now} | Expiry: {expiry}\n"
         p += f"ETH:${spot:,.2f} ATM:${atm:,.0f} PCR:{pcr:.2f}({oi['pcr_trend']}) Δ30m:{oi['pcr_ch_pct']:+.1f}%\n"
         p += f"OI-Sup:${sr.support_strike:,.0f} OI-Res:${sr.resistance_strike:,.0f}\n"
         if sr.near_support:    p += "⚡ NEAR OI-SUPPORT!\n"
         if sr.near_resistance: p += "⚡ NEAR OI-RESISTANCE!\n"
-        p += "\n"
+        p += f"📊 Strikes: {len(filtered_analyses)} key levels (smart filtered from {len(all_analyses)})\n\n"
 
-        # ── Strike table ──
+        # ── Strike table (ONLY FILTERED) ──
         p += "OI+VOL MULTI-TIMEFRAME (CE=Call, PE=Put):\n"
-        for sa in oi["strike_analyses"]:
+        for sa in filtered_analyses:
             tag = "⭐ATM" if sa.is_atm else ("🟢SUP" if sa.is_support else "🔴RES" if sa.is_resistance else "")
             mtf = "✅MTF" if sa.mtf_confirmed else "❌"
             p += (f"\n${sa.strike:,.0f} {tag} W:{sa.weight:.0f}x {mtf}\n"
@@ -964,6 +1010,7 @@ RULES:
 • PUT  OI↑+Vol↑ = support building   = BULLISH → BUY_CALL
 • PCR > 1.3 = bullish bias | PCR < 0.7 = bearish bias
 • ATM strike (3x weight) is primary signal
+• Focus on strikes with ✅MTF confirmation
 
 RESPOND ONLY VALID JSON:
 {{
@@ -990,7 +1037,7 @@ RESPOND ONLY VALID JSON:
 class DeepSeekClient:
 
     URL   = "https://api.deepseek.com/v1/chat/completions"
-    MODEL = "deepseek-chat"
+    MODEL = "deepseek-reasoner"  # DeepSeek V3.2 - Reasoning-first model
 
     def __init__(self, key: str):
         self.key = key
@@ -1068,7 +1115,7 @@ class TelegramAlerter:
         option_type = "CE" if "CALL" in signal_type else "PE" if "PUT" in signal_type else ""
 
         msg = (
-            f"🚨 <b>ETH OPTIONS SIGNAL v6.0</b>\n"
+            f"🚨 <b>ETH OPTIONS SIGNAL v6.0 PRO 🇮🇳</b>\n"
             f"⏰ {datetime.now(timezone.utc).strftime('%d-%b %H:%M UTC')}\n\n"
             f"💰 ETH: <b>${snap.spot_price:,.2f}</b>\n"
             f"📊 Signal: <b>{signal_type}</b>\n"
@@ -1098,14 +1145,15 @@ class TelegramAlerter:
         msg += (
             f"\n⏰ Enter Now: {'✅ YES' if ent.get('now') else '⏳ WAIT'}\n"
             f"{ent.get('reason', '')}\n\n"
-            f"🤖 DeepSeek V3 + MTF v6.0"
+            f"🤖 DeepSeek V3 + MTF v6.0 PRO\n"
+            f"🇮🇳 Delta Exchange India"
         )
 
         await self.send_raw(msg)
 
 
 # ============================================================
-#  MAIN BOT
+#  MAIN BOT (PRO STRATEGY)
 # ============================================================
 
 class ETHOptionsBot:
@@ -1113,6 +1161,11 @@ class ETHOptionsBot:
     Cycle logic:
       Every 15 min  → fetch snapshot → cache_15min → standalone alerts
       Every 30 min  → also → cache_30min → full MTF analysis → DeepSeek → trade alert
+    
+    PRO STRATEGY:
+      - Fetch ATM ±10 strikes for comprehensive market view
+      - Smart filter before sending to AI (only relevant strikes)
+      - Reduces token usage while maintaining quality
     """
 
     def __init__(self):
@@ -1127,12 +1180,13 @@ class ETHOptionsBot:
     # ── Main loop ────────────────────────────────────────────
     async def run(self):
         logger.info("\n" + "="*60)
-        logger.info("🚀 ETH OPTIONS BOT v6.0 – DELTA EXCHANGE GLOBAL")
+        logger.info("🚀 ETH OPTIONS BOT v6.0 PRO – DELTA EXCHANGE INDIA 🇮🇳")
         logger.info("="*60)
         logger.info(f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
         logger.info(f"📦 Cache: 15-min×{CACHE_15MIN_SIZE} + 30-min×{CACHE_30MIN_SIZE} (6hr each)")
         logger.info(f"📊 Snapshot: every {SNAPSHOT_INTERVAL//60}min | Analysis: every {ANALYSIS_INTERVAL//60}min")
         logger.info(f"🔗 Multi-TF: 15-min + 30-min confirmation")
+        logger.info(f"🎯 PRO Strategy: Fetch ±{ATM_STRIKE_FETCH} strikes, send ±{ATM_STRIKE_AI} + key OI to AI")
         logger.info(f"🤖 DeepSeek V3 ({DEEPSEEK_TIMEOUT}s) | Min confidence: {MIN_CONFIDENCE}/10")
         logger.info("="*60 + "\n")
 
@@ -1164,7 +1218,7 @@ class ETHOptionsBot:
         logger.info(f"⏰ {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
         logger.info("="*60)
 
-        # 1. Fetch snapshot
+        # 1. Fetch snapshot (PRO: ATM ±10)
         snap = await self.delta.fetch_snapshot()
         if not snap:
             logger.warning("⚠️  Snapshot fetch failed – skipping")
@@ -1181,7 +1235,7 @@ class ETHOptionsBot:
 
     # ── Full Analysis ────────────────────────────────────────
     async def _full_analysis(self, snap: MarketSnapshot):
-        logger.info("\n🔍 Running multi-timeframe OI analysis...")
+        logger.info("\n🔍 Running multi-timeframe OI analysis (PRO Strategy)...")
         oi = await self.mtf.analyze(snap)
 
         if not oi["available"]:
@@ -1206,7 +1260,7 @@ class ETHOptionsBot:
         patterns       = PatternDetector.detect(c15) if not c15.empty else []
         p_sup, p_res   = PatternDetector.support_resistance(c15) if not c15.empty else (0.0, 0.0)
 
-        # Build prompt
+        # Build prompt (PRO: Smart filtering applied inside)
         prompt = PromptBuilder.build(
             spot=snap.spot_price, atm=snap.atm_strike, expiry=snap.expiry,
             oi=oi, c15=c15, c30=c30,
@@ -1274,7 +1328,7 @@ class ETHOptionsBot:
 async def health(request):
     s15, s30 = bot_instance.cache.sizes() if bot_instance else (0, 0)
     return aiohttp.web.Response(
-        text=f"✅ ETH Options Bot v6.0 | Cache: 15m={s15}/{CACHE_15MIN_SIZE} 30m={s30}/{CACHE_30MIN_SIZE}"
+        text=f"✅ ETH Options Bot v6.0 PRO 🇮🇳 | Cache: 15m={s15}/{CACHE_15MIN_SIZE} 30m={s30}/{CACHE_30MIN_SIZE}"
     )
 
 bot_instance: Optional[ETHOptionsBot] = None
@@ -1301,20 +1355,24 @@ if __name__ == "__main__":
 
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
-║   🚀 ETH OPTIONS BOT v6.0 – DELTA EXCHANGE GLOBAL      ║
+║   🚀 ETH OPTIONS BOT v6.0 PRO – DELTA EXCHANGE INDIA 🇮🇳║
 ╚══════════════════════════════════════════════════════════╝
 
 📋 CONFIG:
-  Asset      : ETH Daily Options (global.delta.exchange)
+  Asset      : ETH Daily Options (india.delta.exchange)
   Snapshot   : Every 15 min  → 15-min cache (24 × 15min = 6hr)
   Analysis   : Every 30 min  → 30-min cache (12 × 30min = 6hr)
   Candles    : 15-min × 24 + 30-min × 24 (short format)
-  Strikes    : ATM ± {ATM_STRIKE_COUNT} (11 total)
+  Strikes    : Fetch ATM ±{ATM_STRIKE_FETCH}, Send ATM ±{ATM_STRIKE_AI} + key OI to AI
 
-✅ FEATURES:
+✅ PRO FEATURES:
   • Multi-TF: 15-min + 30-min OI/Volume/PCR comparison
   • MTF confirmed = both TFs agree → HIGH confidence
   • TRAP filter: OI↑ but Vol flat → ignore
+  • 🆕 SMART FILTERING: Fetch ±10 strikes, send only relevant to AI
+    - Always include: ATM ±5 strikes (core action zone)
+    - Smart include: Far strikes with significant OI/Volume
+    - Always include: Support/Resistance levels
   • 4 standalone alerts (no AI needed):
       1. OI Change   ≥{OI_ALERT_PCT:.0f}% (30-min)
       2. Volume Spike≥{VOL_SPIKE_PCT:.0f}% 
@@ -1324,7 +1382,7 @@ if __name__ == "__main__":
   • Min confidence: {MIN_CONFIDENCE}/10 to send trade alert
 
 🔑 ENV VARS NEEDED:
-  DELTA_API_KEY, DELTA_API_SECRET
+  DELTA_API_KEY, DELTA_API_SECRET (from india.delta.exchange)
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
   DEEPSEEK_API_KEY
 
