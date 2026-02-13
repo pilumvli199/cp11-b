@@ -1,7 +1,16 @@
+# ETH OPTIONS BOT v6.0 - Delta Exchange India
+# Python 3.9+
+
+# Async HTTP Client
 aiohttp==3.9.1
-redis==5.0.1
+
+# Data Processing
 pandas==2.1.4
 numpy==1.26.2
-python-telegram-bot==20.7
-matplotlib==3.8.2
-asyncio==3.4.3
+
+# Date/Time Utilities
+python-dateutil==2.8.2
+pytz==2023.3
+
+# No additional crypto/exchange libraries needed
+# Using native aiohttp for Delta Exchange API calls
