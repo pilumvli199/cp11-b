@@ -15,6 +15,7 @@ Updated   : Feb 2026
 - FIXED: DeepSeek model → deepseek-chat (V3, was wrongly set to R1)
 - FIXED: Strike interval mode calculation (statistics.mode)
 - FIXED: Koyeb sleep (Cache-Control header)
+- FIXED: get_candles() — data["result"] can be list OR dict (AttributeError fix)
 - IMPROVED: DeepSeek prompt with candlestick + S/R + price action logic
 - Price correlation with OI + Volume (Triple confirmation)
 """
@@ -415,7 +416,15 @@ class DeltaClient:
         if not data or not data.get("result"):
             return pd.DataFrame()
 
-        raw  = data["result"].get("candles", data["result"])
+        # ✅ FIX: data["result"] can be a LIST or a DICT
+        # Old code: raw = data["result"].get("candles", data["result"])
+        # This crashed when data["result"] was already a list
+        result = data["result"]
+        if isinstance(result, list):
+            raw = result
+        else:
+            raw = result.get("candles", result)
+
         if not raw:
             return pd.DataFrame()
 
@@ -567,14 +576,12 @@ class PriceActionCalculator:
         price_series = prices
 
         # ── Correlations (Numpy) ──
-        # OI vs Volume correlation
         oi_total = ce_ois + pe_ois
         if len(oi_total) > 2 and np.std(oi_total) > 0 and np.std(vols) > 0:
             oi_vol_corr = float(np.corrcoef(oi_total, vols)[0, 1])
         else:
             oi_vol_corr = 0.0
 
-        # Price vs OI correlation
         if len(price_series) > 2 and np.std(price_series) > 0 and np.std(oi_total) > 0:
             price_oi_corr = float(np.corrcoef(price_series, oi_total)[0, 1])
         else:
@@ -585,7 +592,6 @@ class PriceActionCalculator:
         resistance_levels = []
         if not candles_15m.empty and len(candles_15m) >= 5:
             df  = candles_15m.tail(20)
-            # Swing lows = support
             lows  = df["low"].values
             highs = df["high"].values
             for i in range(1, len(lows) - 1):
@@ -593,12 +599,10 @@ class PriceActionCalculator:
                     support_levels.append(float(lows[i]))
                 if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
                     resistance_levels.append(float(highs[i]))
-            # Keep top 3 nearest to current price
             support_levels    = sorted(support_levels,    key=lambda x: abs(x - curr_price))[:3]
             resistance_levels = sorted(resistance_levels, key=lambda x: abs(x - curr_price))[:3]
 
         # ── Trend strength (0-10) ──
-        # Based on: price momentum + OI buildup + volume confirmation
         ts = 0.0
         if abs(p5m) >= 0.5:  ts += 3.0
         elif abs(p5m) >= 0.3: ts += 1.5
@@ -610,11 +614,10 @@ class PriceActionCalculator:
         trend_strength = min(10.0, ts)
 
         # ── Triple confirmation ──
-        # Price + OI + Volume all pointing same direction
         price_bull  = p5m > 0.3
         price_bear  = p5m < -0.3
-        oi_bull     = pe_ois[-1] > pe_ois[0] if len(pe_ois) > 1 else False  # PUT OI building = bull
-        oi_bear     = ce_ois[-1] > ce_ois[0] if len(ce_ois) > 1 else False  # CALL OI building = bear
+        oi_bull     = pe_ois[-1] > pe_ois[0] if len(pe_ois) > 1 else False
+        oi_bear     = ce_ois[-1] > ce_ois[0] if len(ce_ois) > 1 else False
         vol_confirm = vol_spike >= 1.2
 
         triple_bull = price_bull and oi_bull and vol_confirm
@@ -655,32 +658,17 @@ class PhaseDetector:
     Phase 1: OI building quietly (Smart Money accumulation)
     Phase 2: Volume spike (Move is imminent)
     Phase 3: Price confirms the move
-
-    Logic:
-    ──────
-    Phase 1 triggers when:
-      - ATM CE or PE OI increased ≥ 5% vs 5-min ago
-      - BUT volume still low (< 10% change)  ← Smart Money quietly positioning
-      
-    Phase 2 triggers when:
-      - Volume spike ≥ 20% above rolling average
-      - OI already building (Phase 1 condition met)  ← Retail follows
-      
-    Phase 3 triggers when:
-      - Price moves ≥ 0.4% in 5 min
-      - OI + Volume already confirmed  ← Execute!
     """
 
-    COOLDOWN_PHASE1 = 15 * 60   # 15 min cooldown
-    COOLDOWN_PHASE2 = 10 * 60   # 10 min cooldown
-    COOLDOWN_PHASE3 =  5 * 60   #  5 min cooldown
+    COOLDOWN_PHASE1 = 15 * 60
+    COOLDOWN_PHASE2 = 10 * 60
+    COOLDOWN_PHASE3 =  5 * 60
 
     def __init__(self):
         self._last: Dict[str, float] = {}
-        # Track if Phase 1+2 fired recently for Phase 3 to confirm
         self._phase1_fired_at: float = 0
         self._phase2_fired_at: float = 0
-        self._phase1_side: str = ""   # CALL or PUT
+        self._phase1_side: str = ""
 
     def _can(self, key: str, cooldown: int) -> bool:
         return (time_module.time() - self._last.get(key, 0)) >= cooldown
@@ -703,13 +691,11 @@ class PhaseDetector:
         if not atm_c or not atm_p:
             return signals
 
-        # ── Per-strike OI + Volume changes ──
         ce_oi_ch  = self._pct(atm_c.ce_oi,     atm_p.ce_oi)
         pe_oi_ch  = self._pct(atm_c.pe_oi,     atm_p.pe_oi)
         ce_vol_ch = self._pct(atm_c.ce_volume,  atm_p.ce_volume)
         pe_vol_ch = self._pct(atm_c.pe_volume,  atm_p.pe_volume)
 
-        # Which side is building?
         call_building = ce_oi_ch >= PHASE1_OI_BUILD_PCT
         put_building  = pe_oi_ch >= PHASE1_OI_BUILD_PCT
         dominant_side = "PUT" if put_building and pe_oi_ch >= ce_oi_ch else ("CALL" if call_building else "")
@@ -720,12 +706,10 @@ class PhaseDetector:
         oi_ch  = pe_oi_ch  if dominant_side == "PUT"  else ce_oi_ch
         vol_ch = pe_vol_ch if dominant_side == "PUT"  else ce_vol_ch
         direction = "BULLISH" if dominant_side == "PUT" else "BEARISH"
-        # (PUT OI building = writers protecting support = BULLISH)
-        # (CALL OI building = writers protecting resistance = BEARISH)
 
         now = time_module.time()
 
-        # ── PHASE 1: OI building, Volume still quiet ──
+        # ── PHASE 1 ──
         if (oi_ch >= PHASE1_OI_BUILD_PCT
                 and abs(vol_ch) < PHASE1_VOL_MAX_PCT
                 and self._can("PHASE1", self.COOLDOWN_PHASE1)):
@@ -753,8 +737,8 @@ class PhaseDetector:
                 )
             ))
 
-        # ── PHASE 2: Volume spike with OI already building ──
-        phase1_recent = (now - self._phase1_fired_at) < (25 * 60)  # Phase 1 within 25 min
+        # ── PHASE 2 ──
+        phase1_recent = (now - self._phase1_fired_at) < (25 * 60)
         if (pa.vol_spike_ratio >= (1 + PHASE2_VOL_SPIKE_PCT / 100)
                 and oi_ch >= PHASE2_OI_MIN_PCT
                 and phase1_recent
@@ -783,7 +767,7 @@ class PhaseDetector:
                 )
             ))
 
-        # ── PHASE 3: Price confirms ──
+        # ── PHASE 3 ──
         phase2_recent = (now - self._phase2_fired_at) < (15 * 60)
         price_confirms = (
             (direction == "BULLISH" and pa.price_change_5m >= PHASE3_PRICE_MOVE_PCT) or
@@ -823,7 +807,7 @@ class PhaseDetector:
 
 
 # ============================================================
-#  MTF ANALYZER (unchanged logic, minor updates)
+#  MTF ANALYZER
 # ============================================================
 
 class MTFAnalyzer:
@@ -878,7 +862,6 @@ class MTFAnalyzer:
         return min(10.0, bull * weight * boost), min(10.0, bear * weight * boost)
 
     async def analyze(self, current: MarketSnapshot) -> Dict:
-        # Use 5-min cache: 3 snaps=15min, 6 snaps=30min, 12 snaps=60min
         s_15m = await self.cache.get_5min_ago(3)
         s_30m = await self.cache.get_5min_ago(6)
         s_60m = await self.cache.get_5min_ago(12)
@@ -1017,7 +1000,7 @@ class AlertChecker:
         self._last[key] = time_module.time()
 
     async def check_all(self, curr: MarketSnapshot):
-        prev = await self.cache.get_5min_ago(6)  # 30-min ago
+        prev = await self.cache.get_5min_ago(6)
         if not prev:
             return
         await self._oi_change(curr, prev)
@@ -1170,7 +1153,7 @@ class PatternDetector:
 
 
 # ============================================================
-#  PROMPT BUILDER v7.0 (IMPROVED WITH PRICE ACTION + S/R + CANDLES)
+#  PROMPT BUILDER v7.0
 # ============================================================
 
 class PromptBuilder:
@@ -1190,7 +1173,6 @@ class PromptBuilder:
 
     @staticmethod
     def _candle_table(df: pd.DataFrame, label: str) -> str:
-        """Full price candle table — easier for AI to read"""
         if df.empty:
             return f"{label}: no data\n"
         out  = f"\n{label} CANDLES (TIME|OPEN|HIGH|LOW|CLOSE|VOL|DIR):\n"
@@ -1216,11 +1198,9 @@ class PromptBuilder:
         all_analyses      = oi["strike_analyses"]
         filtered_analyses = PromptBuilder._filter_strikes(all_analyses, atm, sr)
 
-        # ── SYSTEM ROLE ──
         p  = "You are an expert ETH options trader on Delta Exchange India.\n"
         p += "Analyze OI, Volume, Price Action, and Candlesticks to give a precise trade signal.\n\n"
 
-        # ── MARKET SNAPSHOT ──
         p += f"=== MARKET SNAPSHOT | {now} | Expiry: {expiry} ===\n"
         p += f"ETH Spot: ${spot:,.2f}\n"
         p += f"ATM Strike: ${atm:,.0f}\n"
@@ -1229,7 +1209,6 @@ class PromptBuilder:
         if sr.near_support:    p += "⚡ PRICE NEAR OI-SUPPORT!\n"
         if sr.near_resistance: p += "⚡ PRICE NEAR OI-RESISTANCE!\n"
 
-        # ── PRICE ACTION (PRE-CALCULATED BY PANDAS/NUMPY) ──
         p += f"\n=== PRICE ACTION (Pandas/Numpy Pre-Calculated) ===\n"
         p += f"Price Change:  5min={pa.price_change_5m:+.2f}%  15min={pa.price_change_15m:+.2f}%  30min={pa.price_change_30m:+.2f}%\n"
         p += f"Momentum:      {pa.price_momentum}\n"
@@ -1243,7 +1222,6 @@ class PromptBuilder:
         if pa.resistance_levels:
             p += f"Price Resistance: {', '.join(f'${r:.0f}' for r in pa.resistance_levels)}\n"
 
-        # ── PHASE SIGNAL (Early Warning Context) ──
         if phase_signal:
             p += f"\n=== EARLY WARNING PHASE {phase_signal.phase} TRIGGERED ===\n"
             p += f"Side: {phase_signal.dominant_side} OI building\n"
@@ -1252,7 +1230,6 @@ class PromptBuilder:
             p += f"Vol Change: {phase_signal.vol_change_pct:+.1f}%\n"
             p += f"Price Change: {phase_signal.price_change_pct:+.2f}%\n"
 
-        # ── OI MULTI-TIMEFRAME TABLE ──
         p += f"\n=== OI MULTI-TIMEFRAME ({len(filtered_analyses)} key strikes) ===\n"
         p += "Format: STRIKE | CE_OI_15% CE_OI_30% | PE_OI_15% PE_OI_30% | TF15 TF30 | MTF | Conf\n"
         for sa in filtered_analyses:
@@ -1264,21 +1241,17 @@ class PromptBuilder:
                   f"TF15:{sa.tf15_signal[:3]} TF30:{sa.tf30_signal[:3]} {mtf} | "
                   f"Bull:{sa.bull_strength:.0f} Bear:{sa.bear_strength:.0f} Conf:{sa.confidence:.0f}\n")
 
-        # ── CANDLESTICK DATA (FULL PRICE — easier for AI) ──
         p += PromptBuilder._candle_table(c15, "15-MIN")
         p += PromptBuilder._candle_table(c30, "30-MIN")
 
-        # ── CANDLESTICK PATTERNS ──
         if patterns:
             p += "\n=== CANDLESTICK PATTERNS DETECTED ===\n"
             for pat in patterns:
                 p += f"{pat['time'].strftime('%H:%M')} | {pat['pattern']} | {pat['type']} | Strength:{pat['strength']}/10\n"
 
-        # ── PRICE S/R FROM CANDLES ──
         if p_sup or p_res:
             p += f"\nCandle S/R: Support=${p_sup:.2f}  Resistance=${p_res:.2f}\n"
 
-        # ── TRADING RULES (IMPROVED PROMPT v7.0) ──
         p += f"""
 === TRADING RULES ===
 CANDLESTICK RULES:
@@ -1340,8 +1313,7 @@ RESPOND ONLY VALID JSON (no extra text):
 class DeepSeekClient:
 
     URL   = "https://api.deepseek.com/v1/chat/completions"
-    # ✅ FIX: deepseek-chat = DeepSeek V3 (was wrongly "deepseek-reasoner" = R1)
-    MODEL = "deepseek-chat"
+    MODEL = "deepseek-chat"   # DeepSeek V3
 
     def __init__(self, key: str):
         self.key = key
@@ -1351,7 +1323,7 @@ class DeepSeekClient:
         payload = {
             "model":       self.MODEL,
             "messages":    [{"role": "user", "content": prompt}],
-            "temperature": 0.2,      # Lower temp = more consistent JSON
+            "temperature": 0.2,
             "max_tokens":  1500
         }
         try:
@@ -1411,7 +1383,6 @@ class TelegramAlerter:
             logger.error(f"❌ Telegram error: {e}")
 
     async def send_signal(self, sig: Dict, snap: MarketSnapshot, oi: Dict, pa: PriceActionInsight):
-        """Full AI trade signal alert"""
         mtf  = sig.get("mtf",          {})
         atma = sig.get("atm",          {})
         pcra = sig.get("pcr",          {})
@@ -1471,12 +1442,6 @@ class TelegramAlerter:
 # ============================================================
 
 class ETHOptionsBot:
-    """
-    v7.0 Cycle logic:
-      Every 5 min  → fetch snapshot → Phase detection → Standalone alerts
-      Phase 1/2/3  → Smart AI trigger (only when move is building)
-      Every 30 min → Full MTF analysis (regardless of phase)
-    """
 
     def __init__(self):
         self.delta   = DeltaClient(DELTA_API_KEY, DELTA_API_SECRET)
@@ -1523,39 +1488,32 @@ class ETHOptionsBot:
 
     async def _cycle_run(self):
         self._cycle += 1
-        is_analysis = (self._cycle % 6 == 0)  # Every 6th = 30 min
+        is_analysis = (self._cycle % 6 == 0)
 
         logger.info(f"\n{'='*60}")
         logger.info(f"{'🚀 FULL ANALYSIS' if is_analysis else '📦 SNAPSHOT'} CYCLE #{self._cycle}")
         logger.info(f"⏰ {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
         logger.info("="*60)
 
-        # 1. Fetch snapshot
         snap = await self.delta.fetch_snapshot()
         if not snap:
             logger.warning("⚠️ Snapshot failed — skipping")
             return
 
-        # 2. Add to 5-min cache
         await self.cache.add_5min(snap)
 
         if is_analysis:
             await self.cache.add_30min(snap)
 
-        # 3. Standalone alerts (every cycle)
         await self.checker.check_all(snap)
 
-        # 4. Get recent snapshots for Pandas/Numpy calculation
         recent_snaps = await self.cache.get_recent_snapshots(12)
 
-        # 5. Fetch 15-min candles for Price Action calc
         c15 = await self.delta.get_candles("ETHUSD", "15m", CANDLE_COUNT)
 
-        # 6. Pre-calculate all insights with Pandas + Numpy
         pa = PriceActionCalculator.calculate(recent_snaps, c15)
         logger.info(f"📊 Price: 5m={pa.price_change_5m:+.2f}% | Vol spike: {pa.vol_spike_ratio:.2f}x | Triple: {pa.triple_confirmed}")
 
-        # 7. Phase detection (Early Warning)
         prev_5m       = await self.cache.get_5min_ago(1)
         phase_signals = await self.phase.detect(snap, prev_5m, pa)
 
@@ -1563,18 +1521,15 @@ class ETHOptionsBot:
             logger.info(f"🚨 Phase {ps.phase} detected: {ps.direction}")
             await self.alerter.send_raw(ps.message)
 
-            # Phase 3 = Price confirmed → trigger AI immediately
             if ps.phase == 3:
                 await self._trigger_ai_analysis(snap, pa, ps)
 
-        # 8. Full 30-min MTF analysis
         if is_analysis:
             await self._full_analysis(snap, pa)
 
     async def _trigger_ai_analysis(self, snap: MarketSnapshot,
                                    pa: PriceActionInsight,
                                    phase_signal: PhaseSignal):
-        """Called when Phase 3 fires — immediate AI call"""
         logger.info("🤖 Phase 3 triggered — calling DeepSeek immediately...")
 
         c15 = await self.delta.get_candles("ETHUSD", "15m", CANDLE_COUNT)
@@ -1584,10 +1539,8 @@ class ETHOptionsBot:
         patterns     = PatternDetector.detect(c15)    if not c15.empty else []
         p_sup, p_res = PatternDetector.support_resistance(c15) if not c15.empty else (0.0, 0.0)
 
-        # Quick MTF for OI data
         oi = await self.mtf.analyze(snap)
         if not oi["available"]:
-            # Build minimal OI dict for prompt
             oi = {
                 "available": True, "strike_analyses": [],
                 "sr": SupportResistance(snap.atm_strike, 0, snap.atm_strike, 0, False, False),
@@ -1617,7 +1570,6 @@ class ETHOptionsBot:
             await self.alerter.send_signal(ai_sig, snap, oi, pa)
 
     async def _full_analysis(self, snap: MarketSnapshot, pa: PriceActionInsight):
-        """Full 30-min MTF analysis"""
         logger.info("\n🔍 Running full MTF analysis...")
         oi = await self.mtf.analyze(snap)
 
@@ -1685,7 +1637,6 @@ async def health(request):
     s5, s30 = bot_instance.cache.sizes() if bot_instance else (0, 0)
     return aiohttp.web.Response(
         text=f"✅ ETH Bot v7.0 ALIVE | {datetime.now(timezone.utc).strftime('%H:%M UTC')} | Cache: 5m={s5}/{CACHE_5MIN_SIZE} 30m={s30}/{CACHE_30MIN_SIZE}",
-        # ✅ FIX: Cache-Control prevents Koyeb from caching the response
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
     )
 
@@ -1724,6 +1675,7 @@ if __name__ == "__main__":
   • FIXED: DeepSeek model = deepseek-chat (V3, was R1)
   • FIXED: Strike interval = statistics.mode (correct)
   • FIXED: Koyeb Cache-Control header
+  • FIXED: get_candles() list/dict AttributeError ← v7.0.1
   • IMPROVED: DeepSeek prompt with candlestick + S/R + price action
 
 🚨 PHASE DETECTION:
