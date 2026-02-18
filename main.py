@@ -1539,7 +1539,7 @@ class ETHOptionsBot:
         recent_snaps = await self.cache.get_recent_snapshots(12)
 
         # 5. Fetch 15-min candles for Price Action calc
-        c15 = await self.delta.get_candles("ETHUSD", "15", CANDLE_COUNT)
+        c15 = await self.delta.get_candles("ETHUSD", "15m", CANDLE_COUNT)
 
         # 6. Pre-calculate all insights with Pandas + Numpy
         pa = PriceActionCalculator.calculate(recent_snaps, c15)
@@ -1567,9 +1567,9 @@ class ETHOptionsBot:
         """Called when Phase 3 fires — immediate AI call"""
         logger.info("🤖 Phase 3 triggered — calling DeepSeek immediately...")
 
-        c15 = await self.delta.get_candles("ETHUSD", "15", CANDLE_COUNT)
+        c15 = await self.delta.get_candles("ETHUSD", "15m", CANDLE_COUNT)
         await asyncio.sleep(API_DELAY)
-        c30 = await self.delta.get_candles("ETHUSD", "30", CANDLE_COUNT)
+        c30 = await self.delta.get_candles("ETHUSD", "30m", CANDLE_COUNT)
 
         patterns     = PatternDetector.detect(c15)    if not c15.empty else []
         p_sup, p_res = PatternDetector.support_resistance(c15) if not c15.empty else (0.0, 0.0)
@@ -1620,9 +1620,9 @@ class ETHOptionsBot:
             return
 
         logger.info("📈 Fetching candles for full analysis...")
-        c15 = await self.delta.get_candles("ETHUSD", "15", CANDLE_COUNT)
+        c15 = await self.delta.get_candles("ETHUSD", "15m", CANDLE_COUNT)
         await asyncio.sleep(API_DELAY)
-        c30 = await self.delta.get_candles("ETHUSD", "30", CANDLE_COUNT)
+        c30 = await self.delta.get_candles("ETHUSD", "30m", CANDLE_COUNT)
 
         patterns     = PatternDetector.detect(c15)    if not c15.empty else []
         p_sup, p_res = PatternDetector.support_resistance(c15) if not c15.empty else (0.0, 0.0)
