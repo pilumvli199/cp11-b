@@ -391,8 +391,18 @@ class DeltaClient:
         return {t["symbol"]: t for t in data["result"] if t.get("symbol") in sym_set}
 
     async def get_candles(self, symbol: str, resolution: str, count: int) -> pd.DataFrame:
-        end_ts   = int(time_module.time())
-        res_sec  = int(resolution) * 60
+        end_ts  = int(time_module.time())
+        # Parse resolution: "15m"→15min, "1h"→60min, "1d"→1440min, "15"→15min
+        res_str = resolution.lower().strip()
+        if res_str.endswith("m"):
+            res_min = int(res_str[:-1])
+        elif res_str.endswith("h"):
+            res_min = int(res_str[:-1]) * 60
+        elif res_str.endswith("d"):
+            res_min = int(res_str[:-1]) * 1440
+        else:
+            res_min = int(res_str)
+        res_sec  = res_min * 60
         start_ts = end_ts - (count * res_sec) - res_sec * 3
 
         data = await self._get("/v2/history/candles", params={
