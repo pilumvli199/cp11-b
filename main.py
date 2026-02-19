@@ -759,7 +759,7 @@ class PhaseDetector:
                 (direction == "BULLISH" and pa.pcr_delta >= 0) or
                 (direction == "BEARISH" and pa.pcr_delta <= 0)
             )
-            pcr_confirm_str = "✅" if pcr_confirms else "❌"
+            pcr_confirm_str = "YES ✅" if pcr_confirms else "NO ❌"
 
             signals.append(PhaseSignal(
                 phase=1, dominant_side=dominant_side, direction=direction,
