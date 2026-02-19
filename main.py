@@ -18,7 +18,7 @@ import asyncio
 import aiohttp
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -45,7 +45,6 @@ DELTA_BASE_URL = "https://api.india.delta.exchange"
 UNDERLYING       = "ETH"
 # ✅ FIX 1: ±10 → ±3 (only meaningful strikes, noise कमी)
 ATM_STRIKE_FETCH = 3
-ATM_STRIKE_AI    = 3
 STRIKE_INTERVAL  = 20
 
 SNAPSHOT_INTERVAL = 5 * 60
@@ -74,7 +73,6 @@ PHASE2_OI_MIN_PCT     = 5.0    # 3% → 5%
 PHASE2_MIN_ABS_OI     = 150    # Absolute OI minimum for Phase 2
 
 PHASE3_PRICE_MOVE_PCT = 0.4
-PHASE3_CONFIRM_ALL    = True
 
 # Standalone alert thresholds
 OI_ALERT_PCT     = 15.0
@@ -84,7 +82,6 @@ ATM_PROX_USD     = 50
 
 # ✅ FIX 5: Minimum absolute OI for any analysis
 MIN_ABS_OI_THRESHOLD  = 50     # Ignore strikes with OI < 50 contracts
-MIN_ABS_VOL_THRESHOLD = 10
 
 # Strike weights
 ATM_WEIGHT      = 3.0
@@ -686,6 +683,12 @@ class PhaseDetector:
         if not prev_15m:
             return signals
 
+        # ✅ BUG FIX: ATM shift check BEFORE aggregation (not after)
+        # If ATM changed, prev strike data is for different price level = misleading
+        if curr.atm_strike != prev_15m.atm_strike:
+            logger.info(f"⚠️ ATM shifted: {prev_15m.atm_strike} → {curr.atm_strike} — phase detection skipped")
+            return signals
+
         # ✅ FIX: ATM ±1 strikes check (not just ATM)
         strikes_to_check = [curr.atm_strike]
         all_strikes = sorted(curr.strikes_oi.keys())
@@ -722,12 +725,6 @@ class PhaseDetector:
         pe_oi_ch  = self._pct(pe_oi_curr,  pe_oi_prev)
         ce_vol_ch = self._pct(ce_vol_curr, ce_vol_prev)
         pe_vol_ch = self._pct(pe_vol_curr, pe_vol_prev)
-
-        # ✅ FIX: ATM shift detection
-        # ✅ FIX: अगर ATM change झाला तर prev data match होणार नाही
-        if curr.atm_strike != prev_15m.atm_strike:
-            logger.info(f"⚠️ ATM shifted: {prev_15m.atm_strike} → {curr.atm_strike} — phase detection skipped")
-            return signals
 
         call_building = ce_oi_ch >= PHASE1_OI_BUILD_PCT
         put_building  = pe_oi_ch >= PHASE1_OI_BUILD_PCT
@@ -891,7 +888,8 @@ class MTFAnalyzer:
     def _vol_confirm(oi_ch: float, vol_ch: float) -> Tuple[bool, str]:
         if oi_ch > 10 and vol_ch > MIN_VOLUME_CHG: return True,  "STRONG"
         if oi_ch > 5  and vol_ch > 10:             return True,  "MODERATE"
-        if abs(oi_ch) < 5 and abs(vol_ch) < 5:    return True,  "WEAK"
+        # ✅ BUG FIX: Low OI + Low Vol = NOT confirmed (was wrongly True before)
+        if abs(oi_ch) < 5 and abs(vol_ch) < 5:    return False, "WEAK"
         return False, "WEAK"
 
     def _signal_strength(self, ce30: float, pe30: float,
@@ -952,6 +950,10 @@ class MTFAnalyzer:
             ce60 = self._pct(curr.ce_oi, p60.ce_oi if p60 else 0)
             pe60 = self._pct(curr.pe_oi, p60.pe_oi if p60 else 0)
 
+            # ✅ BUG FIX: Use 30min change for _action if 15min data available, else 30min
+            action_ce = ce15 if p15 else ce30
+            action_pe = pe15 if p15 else pe30
+
             # ✅ FIX: Strike-wise PCR delta
             pcr_delta = curr.pcr - (p15.pcr if p15 else curr.pcr)
 
@@ -987,7 +989,7 @@ class MTFAnalyzer:
                 ce_oi_30=ce30, pe_oi_30=pe30, ce_vol_30=cv30, pe_vol_30=pv30, pcr_ch_30=pcr30,
                 ce_oi_60=ce60, pe_oi_60=pe60,
                 pcr=curr.pcr, pcr_delta=pcr_delta,
-                ce_action=self._action(ce15), pe_action=self._action(pe15),
+                ce_action=self._action(action_ce), pe_action=self._action(action_pe),
                 tf15_signal=tf15, tf30_signal=tf30, mtf_confirmed=mtf,
                 vol_confirms=vc, vol_strength=vs,
                 is_support=False, is_resistance=False,
@@ -1133,9 +1135,17 @@ class AlertChecker:
         if abs(pcr_ch) < PCR_ALERT_PCT:
             return
         trend  = "📈 BULLS GAINING" if pcr_ch > 0 else "📉 BEARS GAINING"
-        interp = ("Strong PUT base → Bullish" if curr.overall_pcr > PCR_BULL
-                  else "Strong CALL base → Bearish" if curr.overall_pcr < PCR_BEAR
-                  else "Neutral zone")
+        # ✅ FIX: Bias = absolute PCR + trend direction दोन्ही consider कर
+        if curr.overall_pcr > PCR_BULL:
+            interp = "Strong PUT base → Bullish"
+        elif curr.overall_pcr < PCR_BEAR and pcr_ch < 0:
+            interp = "Strong CALL base → Bearish"
+        elif pcr_ch > 15 and curr.overall_pcr > 0.6:
+            interp = "PCR Rising Fast → Bullish momentum building"
+        elif pcr_ch < -15 and curr.overall_pcr < 0.8:
+            interp = "PCR Falling Fast → Bearish momentum building"
+        else:
+            interp = "Neutral zone"
         txt = (
             f"📊 <b>PCR CHANGE ALERT</b>\n\n"
             f"ETH: ${curr.spot_price:,.2f}\n\n"
