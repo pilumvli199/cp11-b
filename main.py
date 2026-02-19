@@ -64,7 +64,7 @@ PCR_BEAR         = 0.7
 MIN_CONFIDENCE   = 7
 
 # ✅ FIX 2: Phase thresholds updated
-PHASE1_OI_BUILD_PCT   = 12.0   # 5% → 12% (less noise)
+PHASE1_OI_BUILD_PCT   = 15.0   # 5% → 15% (less spam)
 PHASE1_VOL_MAX_PCT    = 15.0   # 10% → 15% (more tolerance)
 PHASE1_MIN_ABS_OI     = 100    # ✅ FIX 3: Minimum absolute OI contracts
 PHASE1_COMPARE_SNAPS  = 3      # ✅ FIX 4: 1 snap(5min) → 3 snaps(15min)
@@ -757,11 +757,12 @@ class PhaseDetector:
             self._phase1_side     = dominant_side
             self._mark("PHASE1")
 
-            # PCR delta confirmation
+            # ✅ FIX: PCR confirms calculated before f-string
             pcr_confirms = (
                 (direction == "BULLISH" and pa.pcr_delta >= 0) or
                 (direction == "BEARISH" and pa.pcr_delta <= 0)
             )
+            pcr_confirm_str = "✅" if pcr_confirms else "❌"
 
             signals.append(PhaseSignal(
                 phase=1, dominant_side=dominant_side, direction=direction,
@@ -777,7 +778,7 @@ class PhaseDetector:
                     f"{'PUT' if dominant_side == 'PUT' else 'CALL'} OI: <b>{oi_ch:+.1f}%</b> ({abs_oi:.0f} contracts)\n"
                     f"Volume: {vol_ch:+.1f}% (still low — smart money only)\n"
                     f"PCR Δ: {pa.pcr_delta:+.3f} ({pa.pcr_acceleration})\n"
-                    f"PCR confirms: {'✅' if pcr_confirms else '❌'}\n\n"
+                    f"PCR confirms: {pcr_confirm_str}\n\n"
                     f"Signal: {direction} | Compared vs 15min ago\n"
                     f"⚠️ Wait for Phase 2 (Volume spike)\n"
                     f"⏰ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
